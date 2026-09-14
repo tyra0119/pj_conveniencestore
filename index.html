@@ -6,7 +6,8 @@
   <title>コンビニ巡回ルート</title>
   <meta name="theme-color" content="#0068b7">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
-  <link rel="stylesheet" href="style.css">
+  <!-- ?v= は更新時にブラウザの古いキャッシュを使わせないためのもの。CSS/JS を変えたら上げる -->
+  <link rel="stylesheet" href="style.css?v=4">
 </head>
 <body>
   <header class="topbar">
@@ -83,6 +84,6 @@
   <div id="toast" class="toast" hidden></div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-  <script src="app.js"></script>
+  <script src="app.js?v=4"></script>
 </body>
 </html>
