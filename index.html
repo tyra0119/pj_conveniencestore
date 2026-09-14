@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>コンビニ巡回ルート</title>
+  <meta name="theme-color" content="#0068b7">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>🏪 コンビニ巡回ルート</h1>
+  </header>
+
+  <div id="map"></div>
+
+  <main class="panel">
+    <section class="card">
+      <h2><span class="step">1</span>出発地と範囲</h2>
+      <div class="row">
+        <button id="btn-locate" class="btn primary" type="button">📍 現在地</button>
+        <form id="addr-form" class="row grow">
+          <input id="addr-input" class="grow" type="search" placeholder="住所・地名で指定">
+          <button class="btn" type="submit">検索</button>
+        </form>
+      </div>
+      <p id="start-label" class="muted small"></p>
+
+      <label class="field">
+        <span>半径 <output id="radius-out">10</output> km</span>
+        <input id="radius" type="range" min="1" max="30" step="1" value="10">
+      </label>
+
+      <div class="chains">
+        <label><input type="checkbox" name="chain" value="lawson"> <span class="dot" style="--c:#0068b7"></span>ローソン</label>
+        <label><input type="checkbox" name="chain" value="seven"> <span class="dot" style="--c:#e8590c"></span>セブン-イレブン</label>
+        <label><input type="checkbox" name="chain" value="family"> <span class="dot" style="--c:#2b8a3e"></span>ファミリーマート</label>
+      </div>
+
+      <button id="btn-search" class="btn primary block" type="button">🔍 店舗を検索</button>
+    </section>
+
+    <section class="card">
+      <h2><span class="step">2</span>巡回する店舗 <span id="store-count" class="badge"></span></h2>
+      <p class="muted small">チェックを外した店舗はルートから除外されます。地図に載っていない店舗は、地図をタップして追加できます。</p>
+      <ul id="store-list" class="store-list"></ul>
+    </section>
+
+    <section class="card">
+      <h2><span class="step">3</span>ルート作成</h2>
+      <label class="field">
+        <span>くじ・グッズ名（記録の単位）</span>
+        <input id="campaign" type="text" placeholder="例：一番くじ ○○">
+      </label>
+      <p id="record-summary" class="muted small"></p>
+      <div class="grid2">
+        <label class="field"><span>出発時刻</span><input id="start-time" type="time"></label>
+        <label class="field"><span>1店あたりの滞在（分）</span><input id="dwell" type="number" min="0" max="60" inputmode="numeric"></label>
+      </div>
+      <label class="check"><input id="roundtrip" type="checkbox"> 最後に出発地へ戻る</label>
+      <label class="check"><input id="skip-recorded" type="checkbox"> 記録済み（購入・売切れ等）の店舗を除く</label>
+      <button id="btn-route" class="btn primary block" type="button">🚗 最短ルートを計算</button>
+      <div id="route-summary"></div>
+    </section>
+
+    <section id="nav-card" class="card" hidden>
+      <h2><span class="step">4</span>巡回 <span id="progress" class="badge"></span></h2>
+      <a id="btn-next" class="btn accent block big" target="_blank" rel="noopener"></a>
+      <ol id="route-list" class="route-list"></ol>
+      <div id="gmaps-links" class="links"></div>
+      <button id="btn-reroute" class="btn block" type="button">🔄 現在地から残りの店舗で再計算</button>
+      <button id="btn-reset-records" class="btn block ghost" type="button">このくじの記録をリセット</button>
+    </section>
+
+    <footer class="muted small">
+      店舗データ © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap contributors</a> ／
+      道路距離 <a href="https://project-osrm.org/" target="_blank" rel="noopener">OSRM</a> ／
+      地図・住所検索 <a href="https://maps.gsi.go.jp/development/ichiran.html" target="_blank" rel="noopener">国土地理院</a>
+    </footer>
+  </main>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+  <script src="app.js"></script>
+</body>
+</html>
