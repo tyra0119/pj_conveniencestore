@@ -34,6 +34,13 @@ const CHAINS = {
     re: /ミニストップ|mini\s?stop/i,
     icon: '<svg viewBox="0 0 32 32" aria-hidden="true"><rect x="1" y="1" width="30" height="30" rx="7" fill="#1c3f94" stroke="#fff" stroke-width="2"/><text x="16" y="21" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="16" font-weight="900" fill="#fff">M</text><rect x="7" y="23.5" width="18" height="3" rx="1.5" fill="#ffd200"/></svg>',
   },
+  // 取扱店リストで取り込んだ、コンビニ以外の店（書店・ホビーショップなど）。OpenStreetMap の店舗検索には使わない
+  other: {
+    label: 'その他のお店',
+    color: '#7048e8',
+    re: /(?!)/,
+    icon: '<svg viewBox="0 0 32 32" aria-hidden="true"><rect x="1" y="1" width="30" height="30" rx="7" fill="#7048e8" stroke="#fff" stroke-width="2"/><path d="M8 13h16v11a2 2 0 0 1-2 2H10a2 2 0 0 1-2-2z" fill="#fff"/><path d="M6 7h20l-2 6H8z" fill="#ffd43b"/><rect x="14" y="18" width="4" height="8" fill="#7048e8"/></svg>',
+  },
 };
 
 const STATUSES = {
@@ -61,13 +68,14 @@ const TABS = ['settings', 'search', 'plan', 'nav'];
 
 // ===== 保存データ =====
 const DEFAULTS = {
-  settings: { radius: 5, chains: ['lawson', 'seven', 'ministop'], dwell: 5, roundtrip: false, skipRecorded: true, campaign: '', reportTo: '' },
+  settings: { radius: 5, chains: ['lawson', 'seven', 'ministop', 'other'], dwell: 5, roundtrip: false, skipRecorded: true, campaign: '', reportTo: '', useKujiList: true },
   start: null, // 出発地で、店を探す範囲の中心 { lat, lng, label, source: gps / map / address / tap }
   stores: [], // 直近の検索結果
   searched: null, // 店舗を検索した範囲 { lat, lng, radius }
   searchedAt: null,
   excluded: {}, // { storeId: true }
   records: {}, // { くじ名: { storeId: { status, note, at } } }
+  kujiLists: {}, // { くじ名: { shops: [{ id, name, address, chain, lat, lng, soldOut }], importedAt } } 取扱店リスト
   route: null, // 計画
   knownChains: Object.keys(CHAINS),
   ui: { tab: 'settings' },
@@ -107,6 +115,17 @@ function campaignKey() {
 
 function currentRecords() {
   return (db.records[campaignKey()] ||= {});
+}
+
+// くじ・グッズの取扱店リスト（公式の店舗検索の結果を貼り付けて取り込んだもの）。この端末にだけ保存する
+function currentKujiList() {
+  return db.kujiLists[campaignKey()] ?? null;
+}
+
+// 取扱店リストで回るか。回るときは、OpenStreetMap の店舗検索の代わりにリストの店を使う
+function activeKujiList() {
+  const list = currentKujiList();
+  return db.settings.useKujiList && list?.shops.length ? list : null;
 }
 
 // ===== ユーティリティ =====
@@ -296,6 +315,131 @@ function dedupe(stores) {
   return out;
 }
 
+// ===== 取扱店リストの取り込み =====
+// 一番くじ公式の「店舗検索」の結果を貼り付けたものを読み取る。店名の次の行が住所、というまとまりを 1 店とみなす。
+// リンク付きで貼られたとき（[店名](URL) の形や HTML）は Googleマップのリンクの座標を使い、無ければ住所から位置を調べる。
+// 公式サイトへはアプリから取りに行かない（robots.txt で店舗検索のデータの取得が禁止されている。貼り付けるのは利用者本人が見た結果）
+const PREF_RE = /^(北海道|東京都|京都府|大阪府|\S{2,3}県)/;
+const LIST_NOISE_RE = /^(ルートを確認する|店舗詳細へ|検索結果|検索条件|一番くじNaviとは|\d+件の店舗|お気に入り|TOPに戻る)/;
+
+function parseShopList(text) {
+  const linkRe = /\[([^\]]*)\]\((\S+?)\)/g;
+  const lines = text.split(/\r?\n/).map((raw) => {
+    const urls = [];
+    const label = raw
+      .replace(linkRe, (_, t, u) => { urls.push(u); return t; })
+      .replace(/https?:\/\/\S+/g, (u) => { urls.push(u); return ''; })
+      .replace(/^[\s*・•-]+/, '')
+      .trim();
+    return { label, urls };
+  }).filter((l) => l.label || l.urls.length);
+
+  const blocks = [];
+  for (let i = 0; i < lines.length; i++) {
+    const { label, urls } = lines[i];
+    const next = lines[i + 1];
+    if (label && !LIST_NOISE_RE.test(label) && !PREF_RE.test(label) && next && PREF_RE.test(next.label)) {
+      blocks.push({ name: label, address: next.label, urls: [...urls, ...next.urls], soldOut: false });
+      i++;
+    } else if (blocks.length) {
+      // 店のまとまりの残り（ルートのリンク・完売の表示）
+      const cur = blocks.at(-1);
+      cur.urls.push(...urls);
+      if (/^完売/.test(label) && label.length < 10) cur.soldOut = true;
+    }
+  }
+
+  return blocks.map((b) => {
+    const joined = b.urls.join(' ');
+    const pos = /[?&]destination=(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/.exec(joined);
+    const shopId = /shops\/(\d+)/.exec(joined)?.[1];
+    return {
+      id: `kuji:${shopId ?? `${b.name}|${b.address}`}`,
+      name: b.name,
+      address: b.address,
+      chain: Object.keys(CHAINS).find((k) => k !== 'other' && CHAINS[k].re.test(b.name)) ?? 'other',
+      lat: pos ? Number(pos[1]) : null,
+      lng: pos ? Number(pos[2]) : null,
+      soldOut: b.soldOut,
+    };
+  });
+}
+
+// コピーしたページの HTML から、リンク先（店舗の番号・Googleマップの座標）を残した文字にする
+function htmlToListText(html) {
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  doc.querySelectorAll('a[href]').forEach((a) => a.replaceWith(`\n[${a.textContent.replace(/\s+/g, ' ').trim()}](${a.getAttribute('href')})\n`));
+  doc.querySelectorAll('br').forEach((br) => br.replaceWith('\n'));
+  doc.querySelectorAll('li, p, div, tr, dt, dd, h1, h2, h3, h4').forEach((el) => el.append('\n'));
+  return doc.body.textContent.split('\n').map((l) => l.trim()).filter(Boolean).join('\n');
+}
+
+// 住所検索に渡す形（全角の数字・ハイフンを半角に）
+const normalizeAddress = (a) => a.normalize('NFKC').replace(/(\d)[‐－―−ー](?=\d)/g, '$1-');
+
+async function importShopList(text) {
+  const parsed = parseShopList(text);
+  if (!parsed.length) {
+    throw new Error('店舗を読み取れませんでした。公式の店舗検索の結果を、店名と住所が入るようにコピーして貼り付けてください');
+  }
+  const list = (db.kujiLists[campaignKey()] ||= { shops: [], importedAt: null });
+  // 同じ店は、店舗の番号が同じか、店名と住所が同じもの（リンク付きと文字だけで貼ると番号の有無が変わるため）
+  const keyOf = (s) => `${s.name.normalize('NFKC').replace(/\s+/g, '')}|${normalizeAddress(s.address).replace(/\s+/g, '')}`;
+  const sameShop = (a, b) => a.id === b.id || keyOf(a) === keyOf(b);
+  const fresh = [];
+  for (const s of parsed) {
+    const known = list.shops.find((k) => sameShop(k, s));
+    if (known) {
+      known.soldOut = s.soldOut; // 取り込み直したら、完売の表示を新しくする
+      if (known.approx && s.lat != null) {
+        // 住所から推定した位置を、リンクの座標で正確にする
+        known.lat = s.lat;
+        known.lng = s.lng;
+        delete known.approx;
+      }
+    } else if (!fresh.some((f) => sameShop(f, s))) {
+      fresh.push(s);
+    }
+  }
+
+  // リンクの座標が無い店（文字だけで貼られたとき）は、住所から位置を調べる
+  const missing = fresh.filter((s) => s.lat == null);
+  const failed = [];
+  try {
+    for (const [i, s] of missing.entries()) {
+      setBusy('import', `📍 住所から店の位置を調べています…（${i + 1}/${missing.length}）`);
+      try {
+        const g = await geocode(normalizeAddress(s.address));
+        s.lat = g.lat;
+        s.lng = g.lng;
+        s.approx = true; // 住所の番地までは合わないことがあり、実際の店から数百m ずれることがある
+      } catch (e) {
+        console.warn(s.address, e);
+        failed.push(s);
+      }
+    }
+  } finally {
+    setBusy('import', null);
+  }
+
+  const added = fresh.filter((s) => s.lat != null);
+  list.shops.push(...added);
+  list.importedAt = Date.now();
+  if (!list.shops.length) delete db.kujiLists[campaignKey()];
+  $('#kuji-paste').value = '';
+  markRouteStale();
+  save();
+  renderAll();
+
+  const dup = parsed.length - fresh.length;
+  const summary = `「${campaignKey()}」の取扱店リストに ${added.length}店を取り込みました（合計 ${list.shops.length}店${dup ? `・取り込み済みの ${dup}店は省略` : ''}）`;
+  if (failed.length) {
+    notice(`${summary}\n\n住所から位置が分からなかった ${failed.length}店は取り込めませんでした：\n${failed.map((s) => `・${s.name}（${s.address}）`).join('\n')}`, { title: '一部の店を取り込めませんでした' });
+  } else {
+    toast(summary, 6000);
+  }
+}
+
 function straightMatrix(points) {
   const distance = points.map((a) => points.map((b) => haversine(a, b) * ROAD_FACTOR));
   return { distance, duration: distance.map((row) => row.map((d) => d / FALLBACK_SPEED)), source: 'straight' };
@@ -465,15 +609,18 @@ function blockedWhileSearching() {
 // ===== 操作 =====
 // 店舗を検索した範囲が、いまの出発地と半径を覆っているか（半径を狭めただけなら検索し直さなくてよい）
 function searchCovers() {
+  if (activeKujiList()) return true; // 取扱店リストで回るときは、店舗検索は使わない
   const s = db.searched;
   return !!(s && db.start && haversine(s, db.start) < 1 && s.radius >= db.settings.radius);
 }
 
+// 回る候補の店。取扱店リストで回るときはリストの店、そうでなければ OpenStreetMap で検索した店
 function visibleStores() {
+  const source = activeKujiList()?.shops ?? db.stores;
   const inRange = (s) => !db.start || haversine(db.start, s) <= db.settings.radius * 1000;
-  const list = db.stores.filter((s) => db.settings.chains.includes(s.chain) && inRange(s));
-  if (db.start) list.sort((a, b) => haversine(db.start, a) - haversine(db.start, b));
-  return list;
+  const stores = source.filter((s) => db.settings.chains.includes(s.chain) && inRange(s));
+  if (db.start) stores.sort((a, b) => haversine(db.start, a) - haversine(db.start, b));
+  return stores;
 }
 
 // 計画のあとに出発地・店舗・設定を変えても、計画は消さずに「古い」にする（回っている最中に一覧が消えないように）
@@ -538,11 +685,13 @@ async function computePlanInner(fromCurrent) {
   const home = db.start;
   const records = currentRecords();
   const skip = fromCurrent || db.settings.skipRecorded;
-  const targets = visibleStores().filter((s) => !db.excluded[s.id] && !(skip && records[s.id]?.status));
+  const targets = visibleStores().filter((s) => !s.soldOut && !db.excluded[s.id] && !(skip && records[s.id]?.status));
   if (!targets.length) {
     throw new Error(fromCurrent
       ? '残りの店はありません（計画の店はすべて記録済みです）'
-      : '回る店がありません。「エリア」タブで半径を広げるか、「設定」タブでコンビニの種類を増やしてください');
+      : activeKujiList()
+        ? '取扱店リストの店が範囲内にありません（公式で完売の店は除いています）。「エリア」タブで出発地や半径を見直すか、「設定」タブで店の種類を増やしてください'
+        : '回る店がありません。「エリア」タブで半径を広げるか、「設定」タブでコンビニの種類を増やしてください');
   }
 
   const { roundtrip, dwell } = db.settings;
@@ -684,7 +833,9 @@ function storePopup(s) {
   div.className = 'popup';
   div.innerHTML = `
     <b>${esc(s.name)}</b>
-    <div class="muted small">${CHAINS[s.chain].label}</div>
+    <div class="muted small">${CHAINS[s.chain].label}${s.address ? `・${esc(s.address)}` : ''}</div>
+    ${s.soldOut ? '<div class="small warn">公式の店舗検索で「完売」</div>' : ''}
+    ${s.approx ? '<div class="small muted">位置は住所からの推定です（数百m ずれることがあります）</div>' : ''}
     <div class="row">
       <a class="btn small primary" href="${esc(navUrl(s))}" target="_blank" rel="noopener">ナビ</a>
       <button class="btn small" type="button">${excluded ? '計画に含める' : '計画から外す'}</button>
@@ -717,6 +868,7 @@ function renderAll() {
   renderRoute();
   renderPlanConditions();
   renderRecordSummary();
+  renderKujiList();
   renderReport();
 }
 
@@ -740,11 +892,16 @@ function renderStart() {
 
 // 出発地や半径を変えたあと、店舗を検索し直す必要があるかを半径スライダーのすぐ下に出す
 function renderSearchHint() {
+  const list = activeKujiList();
   const covers = searchCovers();
   const stores = visibleStores();
   let html = '';
   let quiet = true;
-  if (!db.start) {
+  if (list) {
+    const all = list.shops.filter((s) => db.settings.chains.includes(s.chain)).length;
+    html = `📋 「${esc(campaignKey())}」の取扱店リストの店を回ります（店舗検索は使いません）：範囲内 ${stores.length}店`
+      + (all > stores.length ? `<br>範囲外に ${all - stores.length}店あります。出発地や半径を変えると入ります` : '');
+  } else if (!db.start) {
     html = '';
   } else if (covers) {
     const counts = Object.entries(CHAINS)
@@ -764,6 +921,7 @@ function renderSearchHint() {
   const hint = $('#store-hint');
   hint.innerHTML = html;
   hint.classList.toggle('quiet', quiet);
+  $('#btn-search').hidden = !!list;
   $('#tab-badge-search').textContent = covers ? `${stores.length}店` : db.start ? `${db.settings.radius}km` : '';
 }
 
@@ -794,7 +952,7 @@ function renderStores() {
     const excluded = !!db.excluded[s.id];
     const st = STATUSES[records[s.id]?.status];
     const no = excluded ? null : planNo.get(s.id);
-    const planTag = !r || r.stale || excluded || no || st ? '' : '<span class="tag muted">計画外</span>';
+    const planTag = !r || r.stale || excluded || no || st || s.soldOut ? '' : '<span class="tag muted">計画外</span>';
     return `
       <li class="store${excluded ? ' off' : ''}" data-id="${esc(s.id)}">
         <label class="store-main">
@@ -803,6 +961,7 @@ function renderStores() {
           <span class="store-name">${esc(s.name)}</span>
         </label>
         ${planTag}
+        ${s.soldOut ? '<span class="tag ng">完売（公式）</span>' : ''}
         ${st ? `<span class="tag ${st.tone === 'ok' ? 'ok' : 'ng'}">${st.icon}${st.label}</span>` : ''}
         <span class="muted small">${db.start ? fmtDist(haversine(db.start, s)) : ''}</span>
         <button class="icon-btn" type="button" data-action="focus" title="地図で見る">🗺</button>
@@ -996,8 +1155,24 @@ function renderPlanConditions() {
     s.campaign ? `🎯 ${esc(s.campaign)}` : '',
     `🕒 ${esc($('#start-time').value || nowHHMM())} 出発・${db.start ? `${esc(db.start.label)}から半径 ${s.radius}km` : '出発地は未設定'}`,
     `🏪 ${esc(kinds)}`,
+    activeKujiList() ? `📋 取扱店リスト（${activeKujiList().shops.length}店）の店だけを回る` : '',
     `滞在 ${s.dwell}分${s.roundtrip ? '・出発地へ戻る' : ''}${s.skipRecorded ? '・記録済みの店を除く' : ''}`,
   ].filter(Boolean).map((line) => `<span>${line}</span>`).join('');
+}
+
+function renderKujiList() {
+  const list = currentKujiList();
+  const shops = list?.shops ?? [];
+  const counts = Object.entries(CHAINS)
+    .map(([k, c]) => [c.label, shops.filter((s) => s.chain === k).length])
+    .filter(([, n]) => n)
+    .map(([label, n]) => `${label} ${n}`)
+    .join('・');
+  const soldOut = shops.filter((s) => s.soldOut).length;
+  $('#kuji-status').innerHTML = shops.length
+    ? `📋 「${esc(campaignKey())}」の取扱店リスト：<b>${shops.length}店</b>（${esc(counts)}${soldOut ? `・うち完売 ${soldOut}店` : ''}）<br><span class="muted">${reportClock(list.importedAt)} に取り込み</span>`
+    : `「${esc(campaignKey())}」の取扱店リストはまだありません。無いときは、OpenStreetMap で検索したコンビニを回ります。`;
+  $('#btn-kuji-clear').hidden = !shops.length;
 }
 
 function renderRecordSummary() {
@@ -1023,7 +1198,7 @@ function buildReport() {
   const now = new Date();
   const stamp = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())} ${fmtClock(now)}`;
 
-  const byId = new Map([...db.stores, ...(db.route?.stops ?? [])].map((s) => [s.id, s]));
+  const byId = new Map([...db.stores, ...(currentKujiList()?.shops ?? []), ...(db.route?.stops ?? [])].map((s) => [s.id, s]));
   const line = (id, r) => {
     const st = STATUSES[r.status];
     return `・${st ? `${st.icon} ${st.label}` : '📝 メモ'}　${byId.get(id)?.name ?? '（名前不明の店）'}${r.at ? `（${reportClock(r.at)}）` : ''}${r.note ? `　メモ: ${r.note}` : ''}`;
@@ -1089,6 +1264,7 @@ function syncControls() {
   $('#dwell').value = s.dwell;
   $('#roundtrip').checked = s.roundtrip;
   $('#skip-recorded').checked = s.skipRecorded;
+  $('#use-kuji-list').checked = s.useKujiList;
   $('#campaign').value = s.campaign;
   $('#report-to').value = s.reportTo;
   $('#start-time').value = nowHHMM();
@@ -1124,7 +1300,7 @@ function setTab(name) {
 }
 
 // ===== 全部クリア =====
-// 出発地・見つけた店・計画・外した店をまとめて消す。設定・くじの記録は、確認のチェックを入れたときだけ消す
+// 出発地・見つけた店・計画・外した店をまとめて消す。設定・くじの記録・取扱店リストは、確認のチェックを入れたときだけ消す
 function openClearAll() {
   if (blockedWhileSearching()) return;
   $('#clear-everything').checked = false;
@@ -1138,7 +1314,7 @@ function closeClearAll() {
 }
 
 function clearAll(everything) {
-  const keep = everything ? {} : { settings: db.settings, records: db.records };
+  const keep = everything ? {} : { settings: db.settings, records: db.records, kujiLists: db.kujiLists };
   for (const k of Object.keys(db)) delete db[k];
   Object.assign(db, structuredClone(DEFAULTS), keep);
   startTimeTouched = false;
@@ -1194,6 +1370,32 @@ $('#dwell').addEventListener('input', (e) => {
 
 $('#roundtrip').addEventListener('change', (e) => {
   db.settings.roundtrip = e.target.checked;
+  markRouteStale();
+  save();
+  renderAll();
+});
+
+// 取扱店リスト: リンク付きで貼られたら、リンク先（店舗の番号・Googleマップの座標）を残して取り込む
+$('#kuji-paste').addEventListener('paste', (e) => {
+  const html = e.clipboardData?.getData('text/html');
+  if (!html || !/<a\s/i.test(html)) return;
+  e.preventDefault();
+  const el = e.currentTarget;
+  el.setRangeText(htmlToListText(html), el.selectionStart, el.selectionEnd, 'end');
+});
+
+$('#btn-kuji-import').addEventListener('click', (e) => withBusy(e.currentTarget, '取り込み中…', () => importShopList($('#kuji-paste').value)));
+
+$('#btn-kuji-clear').addEventListener('click', () => {
+  if (!confirm(`「${campaignKey()}」の取扱店リストを消しますか？（くじの記録は残ります）`)) return;
+  delete db.kujiLists[campaignKey()];
+  markRouteStale();
+  save();
+  renderAll();
+});
+
+$('#use-kuji-list').addEventListener('change', (e) => {
+  db.settings.useKujiList = e.target.checked;
   markRouteStale();
   save();
   renderAll();

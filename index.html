@@ -7,7 +7,7 @@
   <meta name="theme-color" content="#0068b7">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
   <!-- ?v= は更新時にブラウザの古いキャッシュを使わせないためのもの。CSS/JS を変えたら上げる -->
-  <link rel="stylesheet" href="style.css?v=8">
+  <link rel="stylesheet" href="style.css?v=10">
 </head>
 <body>
   <header class="topbar">
@@ -36,12 +36,29 @@
       </label>
       <p id="record-summary" class="muted small"></p>
 
+      <h3 class="subhead">取扱店リスト（一番くじなど）</h3>
+      <p id="kuji-status" class="kuji-status small"></p>
+      <label class="check"><input id="use-kuji-list" type="checkbox"> 取扱店リストがあるときは、リストの店だけを回る</label>
+      <details class="import-box">
+        <summary>公式の店舗検索の結果を貼り付けて取り込む</summary>
+        <ol class="import-steps small muted">
+          <li>上の「くじ・グッズ名」を入れておく（リストはくじ名ごとに保存します）</li>
+          <li><a href="https://1kuji.com/shop_lists" target="_blank" rel="noopener">一番くじの店舗検索</a>で、商品と地域を選んで検索する</li>
+          <li>「○件の店舗がみつかりました」から最後の店までをコピーして、下に貼り付ける</li>
+        </ol>
+        <textarea id="kuji-paste" rows="6" placeholder="ここに検索結果を貼り付け（別の市区町村の結果も、続けて取り込むと足されます）"></textarea>
+        <button id="btn-kuji-import" class="btn primary block" type="button">📋 取り込む</button>
+        <p class="muted small">取り込んだリストはこの端末にだけ保存され、ほかの人には共有されません。このアプリから公式サイトへ自動でアクセスすることはありません。</p>
+      </details>
+      <button id="btn-kuji-clear" class="btn small ghost" type="button" hidden>取扱店リストを消す</button>
+
       <h3 class="subhead">コンビニの種類</h3>
       <div class="chains">
         <label><input type="checkbox" name="chain" value="lawson"> <span class="chain-icon" data-chain="lawson"></span>ローソン</label>
         <label><input type="checkbox" name="chain" value="seven"> <span class="chain-icon" data-chain="seven"></span>セブン-イレブン</label>
         <label><input type="checkbox" name="chain" value="family"> <span class="chain-icon" data-chain="family"></span>ファミリーマート</label>
         <label><input type="checkbox" name="chain" value="ministop"> <span class="chain-icon" data-chain="ministop"></span>ミニストップ</label>
+        <label><input type="checkbox" name="chain" value="other"> <span class="chain-icon" data-chain="other"></span>その他のお店（書店・ホビーなど。取扱店リストのみ）</label>
       </div>
 
       <h3 class="subhead">時刻と回り方</h3>
@@ -158,8 +175,8 @@
     <div class="busy-card notice-card confirm-card">
       <div class="notice-icon" aria-hidden="true">🗑</div>
       <b id="confirm-title">全部クリアしますか？</b>
-      <p class="confirm-list">消すもの：出発地、見つけた店、計画、計画から外した店<br>残すもの：設定（くじ名・コンビニ・時刻など）、くじの記録</p>
-      <label class="check"><input id="clear-everything" type="checkbox"> 設定とくじの記録も消して、最初の状態に戻す（元に戻せません）</label>
+      <p class="confirm-list">消すもの：出発地、見つけた店、計画、計画から外した店<br>残すもの：設定（くじ名・コンビニ・時刻など）、くじの記録、取扱店リスト</p>
+      <label class="check"><input id="clear-everything" type="checkbox"> 設定・くじの記録・取扱店リストも消して、最初の状態に戻す（元に戻せません）</label>
       <div class="confirm-actions">
         <button id="clear-cancel" class="btn" type="button">キャンセル</button>
         <button id="clear-ok" class="btn danger" type="button">クリアする</button>
@@ -169,6 +186,6 @@
   <div id="toast" class="toast" hidden></div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-  <script src="app.js?v=8"></script>
+  <script src="app.js?v=10"></script>
 </body>
 </html>
