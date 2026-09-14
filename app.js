@@ -29,7 +29,7 @@ const NO_NAME_CAMPAIGN = '(名称未設定)';
 
 // ===== 保存データ =====
 const DEFAULTS = {
-  settings: { radius: 10, chains: ['lawson', 'seven'], dwell: 5, roundtrip: false, skipRecorded: true, campaign: '' },
+  settings: { radius: 5, chains: ['lawson', 'seven'], dwell: 5, roundtrip: false, skipRecorded: true, campaign: '' },
   start: null, // { lat, lng, label }
   stores: [], // 直近の検索結果
   searchedAt: null,
@@ -442,9 +442,9 @@ function setNote(id, note) {
 
 // ===== 地図 =====
 const map = L.map('map', { keyboard: false }).setView([36.2, 138.25], 5);
-L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png', {
-  maxZoom: 18,
-  attribution: '<a href="https://maps.gsi.go.jp/development/ichiran.html" target="_blank" rel="noopener">地理院タイル</a>',
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 19,
+  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors',
 }).addTo(map);
 
 const layers = {
