@@ -45,7 +45,8 @@ function load() {
   const base = structuredClone(DEFAULTS);
   try {
     const raw = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
-    return { ...base, ...raw, settings: { ...base.settings, ...raw.settings } };
+    // 半径は保存値を使わず、毎回初期値から始める
+    return { ...base, ...raw, settings: { ...base.settings, ...raw.settings, radius: base.settings.radius } };
   } catch {
     return base;
   }
