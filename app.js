@@ -3,10 +3,26 @@
 // ===== 設定 =====
 const STORAGE_KEY = 'konbini-route:v1';
 
+// icon はチェーンの配色をもとにした簡易アイコン（公式ロゴではない）
 const CHAINS = {
-  lawson: { label: 'ローソン', color: '#0068b7', re: /ローソン|lawson/i },
-  seven: { label: 'セブン-イレブン', color: '#e8590c', re: /セブン[\s\-‐－ー・]?イレブン|7[\s\-‐]?eleven|seven[\s\-‐]?eleven/i },
-  family: { label: 'ファミリーマート', color: '#2b8a3e', re: /ファミリーマート|family\s?mart/i },
+  lawson: {
+    label: 'ローソン',
+    color: '#0068b7',
+    re: /ローソン|lawson/i,
+    icon: '<svg viewBox="0 0 32 32" aria-hidden="true"><rect x="1" y="1" width="30" height="30" rx="7" fill="#0068b7" stroke="#fff" stroke-width="2"/><path d="M12.5 6h7v3.2l3 3.3V24a2 2 0 0 1-2 2h-9a2 2 0 0 1-2-2V12.5l3-3.3z" fill="#fff"/><rect x="9.5" y="15.5" width="13" height="5" fill="#0068b7"/></svg>',
+  },
+  seven: {
+    label: 'セブン-イレブン',
+    color: '#e8590c',
+    re: /セブン[\s\-‐－ー・]?イレブン|7[\s\-‐]?eleven|seven[\s\-‐]?eleven/i,
+    icon: '<svg viewBox="0 0 32 32" aria-hidden="true"><rect x="1" y="1" width="30" height="30" rx="7" fill="#fff" stroke="#fff" stroke-width="2"/><rect x="4" y="7" width="24" height="5.5" fill="#f58220"/><rect x="4" y="13.25" width="24" height="5.5" fill="#00a650"/><rect x="4" y="19.5" width="24" height="5.5" fill="#ee2e24"/><text x="16" y="24.5" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="19" font-weight="900" fill="#fff" stroke="#1d2330" stroke-width="1.4" paint-order="stroke">7</text></svg>',
+  },
+  family: {
+    label: 'ファミリーマート',
+    color: '#2b8a3e',
+    re: /ファミリーマート|family\s?mart/i,
+    icon: '<svg viewBox="0 0 32 32" aria-hidden="true"><rect x="1" y="1" width="30" height="30" rx="7" fill="#fff" stroke="#fff" stroke-width="2"/><path d="M1 8a7 7 0 0 1 7-7h16a7 7 0 0 1 7 7v3H1z" fill="#0a8ad2"/><path d="M1 21h30v3a7 7 0 0 1-7 7H8a7 7 0 0 1-7-7z" fill="#00a73c"/><text x="16" y="20.3" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" font-weight="900" fill="#0a8ad2">F</text></svg>',
+  },
 };
 
 const STATUSES = {
@@ -16,9 +32,11 @@ const STATUSES = {
   skip: { label: 'スキップ', icon: '⏭', tone: 'skip' },
 };
 
+// 公開 Overpass サーバーは混雑すると 504 やタイムアウトになるため、応答の速い順に試す
 const OVERPASS_ENDPOINTS = [
-  'https://overpass-api.de/api/interpreter',
-  'https://overpass.kumi.systems/api/interpreter',
+  { url: 'https://maps.mail.ru/osm/tools/overpass/api/interpreter', timeout: 15000 },
+  { url: 'https://overpass-api.de/api/interpreter', timeout: 15000 },
+  { url: 'https://overpass.kumi.systems/api/interpreter', timeout: 30000 },
 ];
 const OSRM_BASE = 'https://router.project-osrm.org';
 const EXACT_LIMIT = 15; // この店舗数以下なら全組み合わせから厳密な最短を求める
@@ -125,7 +143,7 @@ async function withBusy(btn, label, fn) {
     return await fn();
   } catch (e) {
     console.error(e);
-    toast(e.name === 'AbortError' ? '通信がタイムアウトしました' : e.message, 5000);
+    toast(e.name === 'AbortError' ? '通信がタイムアウトしました' : e.message, 8000);
   } finally {
     btn.disabled = false;
     btn.textContent = original;
@@ -171,17 +189,21 @@ async function geocode(q) {
 
 async function fetchStores(center, radiusKm) {
   const query = `[out:json][timeout:25];nwr["shop"="convenience"](around:${Math.round(radiusKm * 1000)},${center.lat},${center.lng});out center tags;`;
-  let lastError;
-  for (const endpoint of OVERPASS_ENDPOINTS) {
+  const errors = [];
+  for (const { url, timeout } of OVERPASS_ENDPOINTS) {
+    const host = new URL(url).hostname;
     try {
-      const json = await fetchJson(endpoint, { method: 'POST', body: new URLSearchParams({ data: query }) }, 30000);
+      const json = await fetchJson(url, { method: 'POST', body: new URLSearchParams({ data: query }) }, timeout);
+      // 混雑時は HTTP 200 のまま remark にエラーが入り、結果が空や途中までになることがある
+      if (/runtime error|timed out|rate_limited|out of memory/i.test(json.remark ?? '')) throw new Error(json.remark);
       return dedupe(json.elements.map(toStore).filter(Boolean));
     } catch (e) {
-      lastError = e;
-      console.warn(endpoint, e);
+      console.warn(host, e);
+      errors.push(`${host}: ${e.name === 'AbortError' ? 'タイムアウト' : e.name === 'TypeError' ? '接続できません' : e.message}`);
     }
   }
-  throw new Error(`店舗データを取得できませんでした（${lastError?.message}）`);
+  const keep = db.stores.length ? '前回の検索結果はそのまま使えます。' : '';
+  throw new Error(`店舗データのサーバーが混雑しています。少し待ってから再検索してください。${keep}（${errors.join(' / ')}）`);
 }
 
 function toStore(el) {
@@ -463,6 +485,15 @@ const pinIcon = (color, text, faded = false) => L.divIcon({
   popupAnchor: [0, -14],
 });
 
+// 店舗マーカー: チェーンのアイコン＋右上に巡回順（訪問済みは ✓）
+const storeIcon = (chain, badge, { done = false, faded = false } = {}) => L.divIcon({
+  className: 'pin-wrap',
+  html: `<div class="store-pin${done ? ' done' : ''}${faded ? ' faded' : ''}">${CHAINS[chain].icon}${badge ? `<span class="pin-badge">${esc(badge)}</span>` : ''}</div>`,
+  iconSize: [34, 34],
+  iconAnchor: [17, 17],
+  popupAnchor: [0, -17],
+});
+
 function fitStart() {
   if (db.start) map.fitBounds(L.latLng(db.start.lat, db.start.lng).toBounds(db.settings.radius * 2000));
 }
@@ -571,7 +602,7 @@ function renderStores() {
       <li class="store${excluded ? ' off' : ''}" data-id="${esc(s.id)}">
         <label class="store-main">
           <input type="checkbox" data-action="toggle"${excluded ? '' : ' checked'}>
-          <span class="dot" style="--c:${CHAINS[s.chain].color}"></span>
+          <span class="chain-icon">${CHAINS[s.chain].icon}</span>
           <span class="store-name">${esc(s.name)}</span>
         </label>
         ${st ? `<span class="tag ${st.tone === 'ok' ? 'ok' : 'ng'}">${st.icon}${st.label}</span>` : ''}
@@ -583,9 +614,8 @@ function renderStores() {
 
   for (const s of stores) {
     const done = !!records[s.id]?.status;
-    const label = done ? '✓' : (routeIndex.get(s.id) ?? '');
     const marker = L.marker([s.lat, s.lng], {
-      icon: pinIcon(done ? '#868e96' : CHAINS[s.chain].color, label, !!db.excluded[s.id]),
+      icon: storeIcon(s.chain, done ? '✓' : routeIndex.get(s.id), { done, faded: !!db.excluded[s.id] }),
     }).bindPopup(() => storePopup(s)).addTo(layers.stores);
     markers.set(s.id, marker);
   }
@@ -831,6 +861,7 @@ $('#route-list').addEventListener('change', (e) => {
 });
 
 // ===== 起動 =====
+document.querySelectorAll('.chain-icon[data-chain]').forEach((el) => { el.innerHTML = CHAINS[el.dataset.chain].icon; });
 syncControls();
 renderAll();
 if (db.route) fitRoute();

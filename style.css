@@ -124,13 +124,14 @@ input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--primary)
 .chains { display: flex; flex-wrap: wrap; gap: 6px 14px; }
 .chains label { display: flex; gap: 6px; align-items: center; }
 
-.dot {
+.chain-icon {
+  display: inline-block;
   flex: none;
-  width: 10px;
-  height: 10px;
-  background: var(--c);
-  border-radius: 50%;
+  width: 20px;
+  height: 20px;
+  filter: drop-shadow(0 0 1px rgba(0, 0, 0, .35));
 }
+.chain-icon svg { display: block; width: 100%; height: 100%; }
 
 /* ===== ボタン ===== */
 .btn {
@@ -275,6 +276,33 @@ input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--primary)
   box-shadow: 0 1px 4px rgba(0, 0, 0, .4);
 }
 .pin.faded { opacity: .4; }
+
+.store-pin {
+  position: relative;
+  width: 34px;
+  height: 34px;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, .5));
+}
+.store-pin svg { display: block; width: 100%; height: 100%; }
+.store-pin.done svg { filter: grayscale(1); opacity: .55; }
+.store-pin.faded { opacity: .4; }
+.pin-badge {
+  position: absolute;
+  top: -8px;
+  right: -8px;
+  display: grid;
+  place-items: center;
+  min-width: 19px;
+  height: 19px;
+  padding: 0 4px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #fff;
+  background: var(--accent);
+  border: 1.5px solid #fff;
+  border-radius: 10px;
+}
+.store-pin.done .pin-badge { background: #495057; }
 
 .popup { display: flex; flex-direction: column; gap: 6px; min-width: 190px; }
 .popup hr { width: 100%; margin: 4px 0; border: none; border-top: 1px solid var(--line); }
