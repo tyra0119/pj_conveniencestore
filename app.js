@@ -66,7 +66,6 @@ const DEFAULTS = {
   stores: [], // 直近の検索結果
   searched: null, // 店舗を検索した範囲 { lat, lng, radius }
   searchedAt: null,
-  custom: [], // 手動追加した店舗
   excluded: {}, // { storeId: true }
   records: {}, // { くじ名: { storeId: { status, note, at } } }
   route: null, // 計画
@@ -79,7 +78,8 @@ const db = load();
 function load() {
   const base = structuredClone(DEFAULTS);
   try {
-    const raw = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+    // 手動で追加した店（custom）は、店舗の追加機能ごと無くしたので読み込まない（2026-09-15 利用者の指示）
+    const { custom, ...raw } = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
     // 半径は保存値を使わず、毎回初期値から始める
     const settings = { ...base.settings, ...raw.settings, radius: base.settings.radius };
     // 後から追加したチェーンのうち初期値でオンのものは、保存済みの選択にも加える
@@ -470,8 +470,8 @@ function searchCovers() {
 }
 
 function visibleStores() {
-  const inRange = (s) => s.custom || !db.start || haversine(db.start, s) <= db.settings.radius * 1000;
-  const list = [...db.stores, ...db.custom].filter((s) => db.settings.chains.includes(s.chain) && inRange(s));
+  const inRange = (s) => !db.start || haversine(db.start, s) <= db.settings.radius * 1000;
+  const list = db.stores.filter((s) => db.settings.chains.includes(s.chain) && inRange(s));
   if (db.start) list.sort((a, b) => haversine(db.start, a) - haversine(db.start, b));
   return list;
 }
@@ -509,12 +509,12 @@ async function searchStores({ quiet = false } = {}) {
   renderAll();
   if (quiet) return;
   fitStart();
-  const n = visibleStores().filter((s) => !s.custom).length;
+  const n = visibleStores().length;
   if (n) {
     toast(`${n}店舗見つかりました`, 4000);
   } else {
     const kinds = db.settings.chains.map((k) => CHAINS[k].label).join('・') || '（種類が選ばれていません）';
-    notice(`出発地から ${area.radius}km 以内に、${kinds} が見つかりませんでした。\n半径を広げるか、「設定」タブでコンビニの種類を増やしてください。地図に載っていない店は、地図をタップして追加できます。`, { title: '店舗が見つかりませんでした', icon: '🔍' });
+    notice(`出発地から ${area.radius}km 以内に、${kinds} が見つかりませんでした。\n半径を広げるか、「設定」タブでコンビニの種類を増やしてください。`, { title: '店舗が見つかりませんでした', icon: '🔍' });
   }
 }
 
@@ -542,7 +542,7 @@ async function computePlanInner(fromCurrent) {
   if (!targets.length) {
     throw new Error(fromCurrent
       ? '残りの店はありません（計画の店はすべて記録済みです）'
-      : '回る店がありません。「エリア」タブで半径を広げるか、「設定」タブでコンビニの種類を増やしてください。地図に載っていない店は、地図をタップして追加できます');
+      : '回る店がありません。「エリア」タブで半径を広げるか、「設定」タブでコンビニの種類を増やしてください');
   }
 
   const { roundtrip, dwell } = db.settings;
@@ -684,7 +684,7 @@ function storePopup(s) {
   div.className = 'popup';
   div.innerHTML = `
     <b>${esc(s.name)}</b>
-    <div class="muted small">${CHAINS[s.chain].label}${s.custom ? '（手動追加）' : ''}</div>
+    <div class="muted small">${CHAINS[s.chain].label}</div>
     <div class="row">
       <a class="btn small primary" href="${esc(navUrl(s))}" target="_blank" rel="noopener">ナビ</a>
       <button class="btn small" type="button">${excluded ? '計画に含める' : '計画から外す'}</button>
@@ -698,34 +698,12 @@ function storePopup(s) {
 
 map.on('click', (e) => {
   const { lat, lng } = e.latlng;
-  const defaultChain = db.settings.chains[0] || 'lawson';
   const div = document.createElement('div');
   div.className = 'popup';
-  div.innerHTML = `
-    <button class="btn small primary block" type="button" data-act="start">🏠 ここを出発地にする</button>
-    <hr>
-    <div class="small muted">この場所に店舗を手動追加</div>
-    <select data-act="chain">${Object.entries(CHAINS).map(([k, c]) => `<option value="${k}"${k === defaultChain ? ' selected' : ''}>${c.label}</option>`).join('')}</select>
-    <input data-act="name" type="text" placeholder="店名（例：○○店）">
-    <button class="btn small block" type="button" data-act="add">＋ 店舗を追加</button>`;
-
-  div.querySelector('[data-act=start]').onclick = () => {
+  div.innerHTML = '<button class="btn small primary block" type="button">🏠 ここを出発地にする</button>';
+  div.querySelector('button').onclick = () => {
     map.closePopup();
     setStart({ lat, lng, label: '地図で指定した地点', source: 'tap' }, { fit: false });
-  };
-  div.querySelector('[data-act=add]').onclick = () => {
-    const chain = div.querySelector('[data-act=chain]').value;
-    const { label, re } = CHAINS[chain];
-    const typed = div.querySelector('[data-act=name]').value.trim();
-    const name = !typed ? `${label}（手動追加）` : re.test(typed) ? typed : `${label} ${typed}`;
-    db.custom.push({ id: `custom:${Date.now()}`, name, chain, lat, lng, custom: true });
-    if (!db.settings.chains.includes(chain)) db.settings.chains.push(chain);
-    markRouteStale();
-    save();
-    map.closePopup();
-    syncControls();
-    renderAll();
-    toast(`「${name}」を追加しました`);
   };
 
   L.popup().setLatLng(e.latlng).setContent(div).openOn(map);
@@ -745,7 +723,8 @@ function renderAll() {
 function renderStart() {
   layers.start.clearLayers();
   const st = db.start;
-  $('#start-label').textContent = st ? `出発地：${st.label}` : '出発地：未設定（上のボタン・住所で決めるか、地図をタップしてください）';
+  const label = st?.source === 'map' ? '🗺 地図の中心（「エリア」タブで地図を動かすと、出発地と範囲も動きます）' : st?.label;
+  $('#start-label').textContent = st ? `出発地：${label}` : '出発地：未設定（上のボタン・住所で決めるか、地図をタップしてください）';
   // 出発地の決め方は選択式。選んでいる方のボタンの色を変える
   $('#btn-locate').setAttribute('aria-pressed', String(st?.source === 'gps'));
   $('#btn-mapcenter').setAttribute('aria-pressed', String(st?.source === 'map'));
@@ -827,7 +806,6 @@ function renderStores() {
         ${st ? `<span class="tag ${st.tone === 'ok' ? 'ok' : 'ng'}">${st.icon}${st.label}</span>` : ''}
         <span class="muted small">${db.start ? fmtDist(haversine(db.start, s)) : ''}</span>
         <button class="icon-btn" type="button" data-action="focus" title="地図で見る">🗺</button>
-        ${s.custom ? '<button class="icon-btn" type="button" data-action="delete" title="削除">✕</button>' : ''}
       </li>`;
   }).join('');
 }
@@ -1045,7 +1023,7 @@ function buildReport() {
   const now = new Date();
   const stamp = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())} ${fmtClock(now)}`;
 
-  const byId = new Map([...db.stores, ...db.custom, ...(db.route?.stops ?? [])].map((s) => [s.id, s]));
+  const byId = new Map([...db.stores, ...(db.route?.stops ?? [])].map((s) => [s.id, s]));
   const line = (id, r) => {
     const st = STATUSES[r.status];
     return `・${st ? `${st.icon} ${st.label}` : '📝 メモ'}　${byId.get(id)?.name ?? '（名前不明の店）'}${r.at ? `（${reportClock(r.at)}）` : ''}${r.note ? `　メモ: ${r.note}` : ''}`;
@@ -1146,7 +1124,7 @@ function setTab(name) {
 }
 
 // ===== 全部クリア =====
-// 出発地・見つけた店・計画・外した店をまとめて消す。設定・くじの記録・手動で追加した店は、確認のチェックを入れたときだけ消す
+// 出発地・見つけた店・計画・外した店をまとめて消す。設定・くじの記録は、確認のチェックを入れたときだけ消す
 function openClearAll() {
   if (blockedWhileSearching()) return;
   $('#clear-everything').checked = false;
@@ -1160,7 +1138,7 @@ function closeClearAll() {
 }
 
 function clearAll(everything) {
-  const keep = everything ? {} : { settings: db.settings, records: db.records, custom: db.custom };
+  const keep = everything ? {} : { settings: db.settings, records: db.records };
   for (const k of Object.keys(db)) delete db[k];
   Object.assign(db, structuredClone(DEFAULTS), keep);
   startTimeTouched = false;
@@ -1234,10 +1212,24 @@ $('#btn-locate').addEventListener('click', (e) => withBusy(e.currentTarget, '�
   toast(`現在地を出発地にしました${pos.accuracy ? `（誤差 約${Math.round(pos.accuracy)}m）` : ''}`);
 }));
 
+// 「地図の中心」は選択式（ConveniRadar のエリア検索と同じ）。選んでいる間は、エリアタブで地図を動かすと出発地も動く。
+// 以前は押した瞬間の中心で止まり、地図を動かしても出発地が付いてこないので「機能していない」ように見えた（2026-09-15）
 $('#btn-mapcenter').addEventListener('click', () => {
   const c = map.getCenter();
-  setStart({ lat: c.lat, lng: c.lng, label: '地図の中心', source: 'map' }, { fit: false });
-  toast('地図の中心を出発地にしました');
+  // 範囲の円が見える大きさまで拡大・縮小する（中心は変わらない）。日本全体の表示のままだと、円が小さすぎて何も起きないように見える
+  setStart({ lat: c.lat, lng: c.lng, label: '地図の中心', source: 'map' });
+  toast('地図の中心を出発地にしました。地図を動かすと、出発地と範囲も一緒に動きます', 5000);
+});
+
+map.on('moveend', () => {
+  const st = db.start;
+  if (st?.source !== 'map' || db.ui.tab !== 'search' || searching) return;
+  const c = map.getCenter();
+  if (Math.abs(st.lat - c.lat) < 1e-6 && Math.abs(st.lng - c.lng) < 1e-6) return;
+  db.start = { lat: c.lat, lng: c.lng, label: '地図の中心', source: 'map' };
+  markRouteStale();
+  save();
+  renderAll();
 });
 
 $('#addr-form').addEventListener('submit', (e) => {
@@ -1253,6 +1245,8 @@ $('#radius').addEventListener('input', (e) => {
   markRouteStale();
   save();
   renderAll();
+  // 範囲の円がちょうど収まるように、地図も拡大・縮小する（中心は変わらないので、地図の中心を選んでいても出発地は動かない）
+  if (db.start) map.fitBounds(L.latLng(db.start.lat, db.start.lng).toBounds(db.settings.radius * 2000), { animate: false });
 });
 
 $('#btn-search').addEventListener('click', (e) => withBusy(e.currentTarget, '検索中…', () => searchStores()));
@@ -1273,15 +1267,7 @@ $('#store-list').addEventListener('change', (e) => {
 $('#store-list').addEventListener('click', (e) => {
   const btn = e.target.closest('button[data-action]');
   const id = btn?.closest('[data-id]')?.dataset.id;
-  if (!id) return;
-  if (btn.dataset.action === 'focus') {
-    focusStore(id);
-  } else if (btn.dataset.action === 'delete') {
-    db.custom = db.custom.filter((s) => s.id !== id);
-    markRouteStale();
-    save();
-    renderAll();
-  }
+  if (id && btn.dataset.action === 'focus') focusStore(id);
 });
 
 // 巡回タブ

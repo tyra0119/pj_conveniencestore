@@ -7,7 +7,7 @@
   <meta name="theme-color" content="#0068b7">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
   <!-- ?v= は更新時にブラウザの古いキャッシュを使わせないためのもの。CSS/JS を変えたら上げる -->
-  <link rel="stylesheet" href="style.css?v=6">
+  <link rel="stylesheet" href="style.css?v=8">
 </head>
 <body>
   <header class="topbar">
@@ -73,7 +73,7 @@
       </label>
       <div id="store-hint" class="store-hint"></div>
       <button id="btn-search" class="btn block" type="button">🔍 店舗を検索</button>
-      <p class="muted small">店舗データは OpenStreetMap のものです。載っていない店は、地図をタップして追加できます。</p>
+      <p class="muted small">店舗データは OpenStreetMap のものです。載っていない店や、閉店している店があることがあります。</p>
 
       <button class="btn primary block" type="button" data-goto="plan">次へ：計画へ →</button>
     </section>
@@ -158,8 +158,8 @@
     <div class="busy-card notice-card confirm-card">
       <div class="notice-icon" aria-hidden="true">🗑</div>
       <b id="confirm-title">全部クリアしますか？</b>
-      <p class="confirm-list">消すもの：出発地、見つけた店、計画、計画から外した店<br>残すもの：設定（くじ名・コンビニ・時刻など）、くじの記録、手動で追加した店</p>
-      <label class="check"><input id="clear-everything" type="checkbox"> 設定・くじの記録・手動で追加した店も消して、最初の状態に戻す（元に戻せません）</label>
+      <p class="confirm-list">消すもの：出発地、見つけた店、計画、計画から外した店<br>残すもの：設定（くじ名・コンビニ・時刻など）、くじの記録</p>
+      <label class="check"><input id="clear-everything" type="checkbox"> 設定とくじの記録も消して、最初の状態に戻す（元に戻せません）</label>
       <div class="confirm-actions">
         <button id="clear-cancel" class="btn" type="button">キャンセル</button>
         <button id="clear-ok" class="btn danger" type="button">クリアする</button>
@@ -169,6 +169,6 @@
   <div id="toast" class="toast" hidden></div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-  <script src="app.js?v=6"></script>
+  <script src="app.js?v=8"></script>
 </body>
 </html>
