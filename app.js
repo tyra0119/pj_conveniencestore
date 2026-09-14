@@ -1,7 +1,11 @@
 'use strict';
 
+// 画面の組み立ては ConveniRadar（電車版）にそろえている:
+// 設定 → エリア → 計画 → 巡回 のタブ、画面中央の「検索中」と知らせ、全部クリア、実績を送る
+
 // ===== 設定 =====
 const STORAGE_KEY = 'konbini-route:v1';
+const APP_URL = 'https://tyra0119.github.io/lawson/';
 
 // icon はチェーンの配色をもとにした簡易アイコン（公式ロゴではない）
 const CHAINS = {
@@ -39,9 +43,10 @@ const STATUSES = {
   skip: { label: 'スキップ', icon: '⏭', tone: 'skip' },
 };
 
-// 公開 Overpass サーバーは混雑すると 504 やタイムアウトになるため、応答の速い順に試す
+// 公開 Overpass サーバーは混雑すると 504 やタイムアウトになるため、応答の速い順に試す。
+// maps.mail.ru は応答しないまま待たされることがある（ConveniRadar で 15 秒切れが続いた）ので短めに切り上げる
 const OVERPASS_ENDPOINTS = [
-  { url: 'https://maps.mail.ru/osm/tools/overpass/api/interpreter', timeout: 15000 },
+  { url: 'https://maps.mail.ru/osm/tools/overpass/api/interpreter', timeout: 10000 },
   { url: 'https://overpass-api.de/api/interpreter', timeout: 15000 },
   { url: 'https://overpass.kumi.systems/api/interpreter', timeout: 30000 },
 ];
@@ -51,18 +56,22 @@ const GMAPS_MAX_WAYPOINTS = 9; // Googleマップ URL に渡せる経由地の�
 const ROAD_FACTOR = 1.35; // 道路データが取れないときの「直線距離→道路距離」係数
 const FALLBACK_SPEED = 40 / 3.6; // 同上の平均速度 (m/s)
 const NO_NAME_CAMPAIGN = '(名称未設定)';
+const MAILTO_MAX = 1800; // これより長い mailto はメールアプリによって途中で切れる
+const TABS = ['settings', 'search', 'plan', 'nav'];
 
 // ===== 保存データ =====
 const DEFAULTS = {
-  settings: { radius: 5, chains: ['lawson', 'seven', 'ministop'], dwell: 5, roundtrip: false, skipRecorded: true, campaign: '' },
-  start: null, // { lat, lng, label }
+  settings: { radius: 5, chains: ['lawson', 'seven', 'ministop'], dwell: 5, roundtrip: false, skipRecorded: true, campaign: '', reportTo: '' },
+  start: null, // 出発地で、店を探す範囲の中心 { lat, lng, label, source: gps / map / address / tap }
   stores: [], // 直近の検索結果
+  searched: null, // 店舗を検索した範囲 { lat, lng, radius }
   searchedAt: null,
   custom: [], // 手動追加した店舗
   excluded: {}, // { storeId: true }
   records: {}, // { くじ名: { storeId: { status, note, at } } }
-  route: null,
+  route: null, // 計画
   knownChains: Object.keys(CHAINS),
+  ui: { tab: 'settings' },
 };
 
 const db = load();
@@ -78,7 +87,7 @@ function load() {
     for (const k of base.settings.chains) {
       if (!known.includes(k) && !settings.chains.includes(k)) settings.chains.push(k);
     }
-    return { ...base, ...raw, settings, knownChains: Object.keys(CHAINS) };
+    return { ...base, ...raw, settings, ui: { ...base.ui, ...raw.ui }, knownChains: Object.keys(CHAINS) };
   } catch {
     return base;
   }
@@ -122,11 +131,8 @@ function fmtDur(sec) {
 }
 
 const fmtClock = (d) => `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`;
-
-function nowHHMM() {
-  const d = new Date();
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-}
+const pad2 = (n) => String(n).padStart(2, '0');
+const nowHHMM = () => `${pad2(new Date().getHours())}:${pad2(new Date().getMinutes())}`;
 
 let toastTimer;
 function toast(msg, ms = 3000) {
@@ -137,15 +143,42 @@ function toast(msg, ms = 3000) {
   toastTimer = setTimeout(() => { el.hidden = true; }, ms);
 }
 
+// 見つからない・失敗したときの知らせ。画面を暗くして中央に出し、OK を押すまで残す（成功の知らせは toast のまま）
+function notice(message, { title = 'お知らせ', icon = '⚠' } = {}) {
+  $('#notice-icon').textContent = icon;
+  $('#notice-title').textContent = title;
+  $('#notice-text').textContent = message;
+  $('#notice').hidden = false;
+  $('#notice-ok').focus();
+}
+
+function closeNotice() {
+  $('#notice').hidden = true;
+}
+
+// 利用者が止めた（「中断」を押した）ときのエラー。失敗ではないので、中央の知らせではなく小さく知らせる
+class CancelError extends Error {
+  constructor(message = '中断しました') {
+    super(message);
+    this.name = 'CancelError';
+  }
+}
+
+// options.signal を渡すと、呼び出し側からも止められる（時間切れとは別に）
 async function fetchJson(url, options = {}, timeoutMs = 20000) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  const outer = options.signal;
+  const stop = () => ctrl.abort();
+  if (outer?.aborted) stop();
+  outer?.addEventListener('abort', stop);
   try {
     const res = await fetch(url, { ...options, signal: ctrl.signal });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return await res.json();
   } finally {
     clearTimeout(timer);
+    outer?.removeEventListener('abort', stop);
   }
 }
 
@@ -156,23 +189,40 @@ async function withBusy(btn, label, fn) {
   try {
     return await fn();
   } catch (e) {
+    if (e.name === 'CancelError') {
+      toast(e.message, 5000);
+      return undefined;
+    }
     console.error(e);
-    toast(e.name === 'AbortError' ? '通信がタイムアウトしました' : e.message, 8000);
+    notice(e.name === 'AbortError' ? '通信がタイムアウトしました。電波の良い所で、もう一度試してください' : e.message, { title: 'うまくいきませんでした' });
   } finally {
     btn.disabled = false;
     btn.textContent = original;
   }
 }
 
+// 現在地。まず GPS（高精度）で取り、取れなければ（屋内・PC など）精度を落として取り直す。失敗の理由は日本語で案内する
 function getPosition() {
-  return new Promise((resolve, reject) => {
-    if (!navigator.geolocation) return reject(new Error('この端末では現在地を取得できません'));
+  const other = '「🗺 地図の中心を出発地に」か住所で指定してください';
+  if (!navigator.geolocation) return Promise.reject(new Error(`この端末・ブラウザでは現在地を取得できません。${other}`));
+  if (!window.isSecureContext) return Promise.reject(new Error('現在地は https のページでだけ使えます'));
+  const once = (options) => new Promise((resolve, reject) => {
     navigator.geolocation.getCurrentPosition(
-      (p) => resolve({ lat: p.coords.latitude, lng: p.coords.longitude }),
-      (e) => reject(new Error(`現在地を取得できませんでした（${e.message}）`)),
-      { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 },
+      (p) => resolve({ lat: p.coords.latitude, lng: p.coords.longitude, accuracy: p.coords.accuracy }),
+      reject,
+      options,
     );
   });
+  return once({ enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 })
+    .catch((e) => (e.code === 1 ? Promise.reject(e) : once({ enableHighAccuracy: false, timeout: 15000, maximumAge: 600000 })))
+    .catch((e) => {
+      const why = e.code === 1
+        ? `位置情報の利用が許可されていません。ブラウザ（スマホは設定アプリ）で、このサイトの位置情報を「許可」にするか、${other}`
+        : e.code === 3
+          ? `現在地の取得に時間がかかりすぎました。屋外で試すか、${other}`
+          : `現在地を特定できませんでした。位置情報サービスがオンか確かめるか、${other}`;
+      throw new Error(why);
+    });
 }
 
 const navUrl = (p) => `https://www.google.com/maps/dir/?api=1&travelmode=driving&dir_action=navigate&destination=${p.lat},${p.lng}`;
@@ -201,17 +251,22 @@ async function geocode(q) {
   return { lat: Number(r[0].lat), lng: Number(r[0].lon), label: r[0].display_name };
 }
 
-async function fetchStores(center, radiusKm) {
-  const query = `[out:json][timeout:25];nwr["shop"="convenience"](around:${Math.round(radiusKm * 1000)},${center.lat},${center.lng});out center tags;`;
+// signal: 利用者が「中断」を押したら止める。次のサーバーも試さずに CancelError にする
+async function fetchStores(center, radiusKm, signal) {
+  const query = `[out:json][timeout:25];nwr["shop"="convenience"](around:${Math.round(radiusKm * 1000)},${center.lat.toFixed(6)},${center.lng.toFixed(6)});out center tags;`;
+  const scale = radiusKm > 10 ? 2 : 1; // 広い範囲は時間がかかるので待ち時間を伸ばす
   const errors = [];
+  const cancelled = () => new CancelError('店舗の検索を中断しました');
   for (const { url, timeout } of OVERPASS_ENDPOINTS) {
+    if (signal?.aborted) throw cancelled();
     const host = new URL(url).hostname;
     try {
-      const json = await fetchJson(url, { method: 'POST', body: new URLSearchParams({ data: query }) }, timeout);
+      const json = await fetchJson(url, { method: 'POST', body: new URLSearchParams({ data: query }), signal }, timeout * scale);
       // 混雑時は HTTP 200 のまま remark にエラーが入り、結果が空や途中までになることがある
       if (/runtime error|timed out|rate_limited|out of memory/i.test(json.remark ?? '')) throw new Error(json.remark);
       return dedupe(json.elements.map(toStore).filter(Boolean));
     } catch (e) {
+      if (signal?.aborted) throw cancelled();
       console.warn(host, e);
       errors.push(`${host}: ${e.name === 'AbortError' ? 'タイムアウト' : e.name === 'TypeError' ? '接続できません' : e.message}`);
     }
@@ -379,76 +434,159 @@ function solveHeuristic(D, n, roundtrip) {
   return order;
 }
 
+// ===== 検索中・計算中 =====
+// 画面全体を暗くして中央に理由を出す。店舗の検索（search）と計画の計算（plan）が重なることがあるので、
+// 理由ごとに持ち、最後に始まったものを出す
+const busyReasons = new Map();
+function setBusy(key, message) {
+  if (message) busyReasons.set(key, message);
+  else busyReasons.delete(key);
+  const latest = [...busyReasons.entries()].at(-1);
+  $('#busy').hidden = !latest;
+  if (latest) $('#busy-text').textContent = latest[1];
+  $('#busy-cancel').hidden = latest?.[0] !== 'search'; // 店舗の検索のときだけ「中断」を出す
+}
+
+let searching = false;
+let searchAbort = null; // 店舗の検索を「中断」で止めるための AbortController
+function setSearching(on) {
+  searching = on;
+  searchAbort = on ? new AbortController() : null;
+  setBusy('search', on ? '🔍 店舗を検索しています…' : null);
+  for (const el of document.querySelectorAll('#radius, #btn-search, #btn-plan, #btn-locate, #btn-mapcenter, #addr-input, input[name=chain]')) el.disabled = on;
+}
+
+function blockedWhileSearching() {
+  if (!searching) return false;
+  toast('店舗を検索中です。終わるまでお待ちください');
+  return true;
+}
+
 // ===== 操作 =====
+// 店舗を検索した範囲が、いまの出発地と半径を覆っているか（半径を狭めただけなら検索し直さなくてよい）
+function searchCovers() {
+  const s = db.searched;
+  return !!(s && db.start && haversine(s, db.start) < 1 && s.radius >= db.settings.radius);
+}
+
 function visibleStores() {
-  const list = [...db.stores, ...db.custom].filter((s) => db.settings.chains.includes(s.chain));
+  const inRange = (s) => s.custom || !db.start || haversine(db.start, s) <= db.settings.radius * 1000;
+  const list = [...db.stores, ...db.custom].filter((s) => db.settings.chains.includes(s.chain) && inRange(s));
   if (db.start) list.sort((a, b) => haversine(db.start, a) - haversine(db.start, b));
   return list;
 }
 
+// 計画のあとに出発地・店舗・設定を変えても、計画は消さずに「古い」にする（回っている最中に一覧が消えないように）
 function markRouteStale() {
   if (db.route) db.route.stale = true;
 }
 
-function setStart(point) {
+function setStart(point, { fit = true } = {}) {
+  if (blockedWhileSearching()) return;
   db.start = point;
-  db.route = null;
+  markRouteStale();
   save();
   renderAll();
-  fitStart();
+  if (fit) fitStart();
 }
 
-async function searchStores() {
-  if (!db.start) throw new Error('先に出発地を指定してください');
-  db.stores = await fetchStores(db.start, db.settings.radius);
+// quiet: 計画を作る途中で呼ぶときは、見つからなくても知らせを出さない（計画の方で知らせる）
+async function searchStores({ quiet = false } = {}) {
+  if (!db.start) throw new Error('先に「エリア」タブで出発地を決めてください');
+  const area = { lat: db.start.lat, lng: db.start.lng, radius: db.settings.radius };
+  setSearching(true);
+  let found;
+  try {
+    found = await fetchStores(area, area.radius, searchAbort.signal);
+  } finally {
+    setSearching(false);
+  }
+  db.stores = found;
+  db.searched = area;
   db.searchedAt = Date.now();
-  db.route = null;
+  markRouteStale();
   save();
   renderAll();
+  if (quiet) return;
   fitStart();
   const n = visibleStores().filter((s) => !s.custom).length;
-  toast(n ? `${n}店舗見つかりました` : '見つかりませんでした。地図をタップすると手動で追加できます', 4000);
+  if (n) {
+    toast(`${n}店舗見つかりました`, 4000);
+  } else {
+    const kinds = db.settings.chains.map((k) => CHAINS[k].label).join('・') || '（種類が選ばれていません）';
+    notice(`出発地から ${area.radius}km 以内に、${kinds} が見つかりませんでした。\n半径を広げるか、「設定」タブでコンビニの種類を増やしてください。地図に載っていない店は、地図をタップして追加できます。`, { title: '店舗が見つかりませんでした', icon: '🔍' });
+  }
 }
 
-async function computeRoute(fromCurrent) {
-  if (fromCurrent) {
-    db.start = { ...(await getPosition()), label: '現在地' };
-    $('#start-time').value = nowHHMM();
+async function computePlan(fromCurrent = false) {
+  setBusy('plan', fromCurrent ? '📍 現在地から組み直しています…' : '🗓 道路の所要時間を調べて計画を作っています…');
+  try {
+    return await computePlanInner(fromCurrent);
+  } finally {
+    setBusy('plan', null);
   }
-  if (!db.start) throw new Error('先に出発地を指定してください');
+}
 
+// fromCurrent: 巡回中に、現在地から今の時刻で残りの店を組み直す（記録済みの店は除く）
+async function computePlanInner(fromCurrent) {
+  if (!db.start) throw new Error('先に「エリア」タブで出発地を決めてください');
+  if (!db.settings.chains.length) throw new Error('「設定」タブでコンビニの種類を選んでください');
+  // 店舗を探していない範囲があれば、先に探す（組み直しは、計画を作ったときの店のまま）
+  if (!fromCurrent && !searchCovers()) await searchStores({ quiet: true });
+
+  const origin = fromCurrent ? { ...(await getPosition()), label: '現在地' } : db.start;
+  const home = db.start;
   const records = currentRecords();
-  const skipRecorded = fromCurrent || db.settings.skipRecorded;
-  const targets = visibleStores().filter((s) => !db.excluded[s.id] && !(skipRecorded && records[s.id]?.status));
-  if (!targets.length) throw new Error('巡回する店舗がありません');
+  const skip = fromCurrent || db.settings.skipRecorded;
+  const targets = visibleStores().filter((s) => !db.excluded[s.id] && !(skip && records[s.id]?.status));
+  if (!targets.length) {
+    throw new Error(fromCurrent
+      ? '残りの店はありません（計画の店はすべて記録済みです）'
+      : '回る店がありません。「エリア」タブで半径を広げるか、「設定」タブでコンビニの種類を増やしてください。地図に載っていない店は、地図をタップして追加できます');
+  }
 
-  const { roundtrip } = db.settings;
-  const matrix = await buildMatrix([db.start, ...targets]);
+  const { roundtrip, dwell } = db.settings;
+  const extraHome = roundtrip && origin !== home; // 組み直しで出発地へ戻るときは、戻り先を別に足す
+  const matrix = await buildMatrix([origin, ...targets, ...(extraHome ? [home] : [])]);
+  if (extraHome) {
+    // 「ノード 0 へ戻る」コストを、出発地（最後の列）への所要に差し替える
+    for (const m of [matrix.duration, matrix.distance]) {
+      for (const row of m) row[0] = row.pop();
+      m.pop();
+    }
+  }
+
   const order = solveTsp(matrix.duration, targets.length, roundtrip);
-  const nearestFirst = targets.map((_, i) => i); // targets は出発地から近い順
+  const nearestFirst = targets.map((s, i) => [haversine(origin, s), i]).sort((a, b) => a[0] - b[0]).map(([, i]) => i);
   const savedSec = pathCost(matrix.duration, nearestFirst, roundtrip) - pathCost(matrix.duration, order, roundtrip);
 
   const nodes = [0, ...order.map((i) => i + 1), ...(roundtrip ? [0] : [])];
-  const seq = nodes.map((node) => (node === 0 ? db.start : targets[node - 1]));
+  const seq = nodes.map((node, k) => (node === 0 ? (k === 0 ? origin : home) : targets[node - 1]));
   const geometry = await fetchRouteGeometry(seq);
   const legs = geometry?.legs
     ?? nodes.slice(1).map((node, k) => ({ duration: matrix.duration[nodes[k]][node], distance: matrix.distance[nodes[k]][node] }));
 
+  const place = (p) => ({ lat: p.lat, lng: p.lng, label: p.label });
   db.route = {
-    start: { ...db.start },
+    start: place(origin),
+    home: roundtrip ? place(home) : null,
     stops: order.map((i) => ({ ...targets[i] })),
     legs,
     coords: geometry?.coords ?? seq.map((p) => [p.lat, p.lng]),
     roundtrip,
+    dwell,
     orderSource: matrix.source,
     savedSec: Math.max(0, savedSec),
-    startTime: $('#start-time').value || nowHHMM(),
+    startTime: fromCurrent ? nowHHMM() : ($('#start-time').value || nowHHMM()),
     stale: false,
   };
+  navOpenStore = null;
   save();
   renderAll();
   fitRoute();
-  toast(`${targets.length}店舗の巡回ルートを作成しました`);
+  // 巡回タブへは自動で移らない。計画タブで回る店の一覧を見てから「次へ：巡回へ →」で進む
+  const hint = db.ui.tab === 'plan' ? '。「次へ：巡回へ →」で回り始めます' : '';
+  toast(`${targets.length}店舗の${fromCurrent ? '計画を組み直しました' : '計画を作りました'}${hint}`, 5000);
 }
 
 function toggleExcluded(id) {
@@ -475,6 +613,7 @@ function setNote(id, note) {
   rec.note = note.trim() || undefined;
   if (!rec.status && !rec.note) delete records[id];
   save();
+  renderReport();
 }
 
 // ===== 地図 =====
@@ -491,22 +630,27 @@ const layers = {
 };
 const markers = new Map();
 
-const pinIcon = (color, text, faded = false) => L.divIcon({
+const pinIcon = (color, text) => L.divIcon({
   className: 'pin-wrap',
-  html: `<div class="pin${faded ? ' faded' : ''}" style="--c:${color}">${esc(text)}</div>`,
+  html: `<div class="pin" style="--c:${color}">${esc(text)}</div>`,
   iconSize: [28, 28],
   iconAnchor: [14, 14],
   popupAnchor: [0, -14],
 });
 
-// 店舗マーカー: チェーンのアイコン＋右上に巡回順（訪問済みは ✓）
+// 店舗マーカー: チェーンのアイコン＋右上に回る順番（チェーンの色の丸。回り終えたら灰色）
 const storeIcon = (chain, badge, { done = false, faded = false } = {}) => L.divIcon({
   className: 'pin-wrap',
-  html: `<div class="store-pin${done ? ' done' : ''}${faded ? ' faded' : ''}">${CHAINS[chain].icon}${badge ? `<span class="pin-badge">${esc(badge)}</span>` : ''}</div>`,
+  html: `<div class="store-pin${done ? ' done' : ''}${faded ? ' faded' : ''}">${CHAINS[chain].icon}${badge ? `<span class="pin-badge" style="--c:${CHAINS[chain].color}">${esc(badge)}</span>` : ''}</div>`,
   iconSize: [34, 34],
   iconAnchor: [17, 17],
   popupAnchor: [0, -17],
 });
+
+// 一覧の店の印。地図の店と同じ見た目にする
+function storeMark(store, badge, { done = false } = {}) {
+  return `<span class="store-mark${done ? ' done' : ''}">${CHAINS[store.chain].icon}${badge ? `<span class="pin-badge" style="--c:${CHAINS[store.chain].color}">${esc(badge)}</span>` : ''}</span>`;
+}
 
 function fitStart() {
   if (db.start) map.fitBounds(L.latLng(db.start.lat, db.start.lng).toBounds(db.settings.radius * 2000));
@@ -514,6 +658,24 @@ function fitStart() {
 
 function fitRoute() {
   if (db.route) map.fitBounds(L.latLngBounds(db.route.coords), { padding: [30, 30] });
+}
+
+// 店を地図の中心に移して、マーカーを点滅させる（巡回の店の行・回る店の 🗺 を押したとき）
+let blinkTimer;
+function focusStore(id) {
+  const marker = markers.get(id);
+  if (!marker) return;
+  map.setView(marker.getLatLng(), Math.max(map.getZoom(), 16));
+  const el = marker.getElement();
+  if (el) {
+    el.classList.remove('blink');
+    void el.offsetWidth; // 続けて押したときも点滅をやり直す
+    el.classList.add('blink');
+    clearTimeout(blinkTimer);
+    blinkTimer = setTimeout(() => el.classList.remove('blink'), 2500);
+  }
+  // スマホの幅では地図が一覧の上にあるので、地図が見える位置まで戻す
+  if (window.matchMedia('(max-width: 899px)').matches) $('#map').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 function storePopup(s) {
@@ -525,7 +687,7 @@ function storePopup(s) {
     <div class="muted small">${CHAINS[s.chain].label}${s.custom ? '（手動追加）' : ''}</div>
     <div class="row">
       <a class="btn small primary" href="${esc(navUrl(s))}" target="_blank" rel="noopener">ナビ</a>
-      <button class="btn small" type="button">${excluded ? 'ルートに含める' : 'ルートから外す'}</button>
+      <button class="btn small" type="button">${excluded ? '計画に含める' : '計画から外す'}</button>
     </div>`;
   div.querySelector('button').onclick = () => {
     map.closePopup();
@@ -549,7 +711,7 @@ map.on('click', (e) => {
 
   div.querySelector('[data-act=start]').onclick = () => {
     map.closePopup();
-    setStart({ lat, lng, label: '地図で指定した地点' });
+    setStart({ lat, lng, label: '地図で指定した地点', source: 'tap' }, { fit: false });
   };
   div.querySelector('[data-act=add]').onclick = () => {
     const chain = div.querySelector('[data-act=chain]').value;
@@ -572,90 +734,114 @@ map.on('click', (e) => {
 // ===== 描画 =====
 function renderAll() {
   renderStart();
+  renderSearchHint();
   renderStores();
   renderRoute();
+  renderPlanConditions();
   renderRecordSummary();
+  renderReport();
 }
 
 function renderStart() {
   layers.start.clearLayers();
-  $('#start-label').textContent = db.start
-    ? `出発地：${db.start.label}`
-    : '出発地：未設定（地図をタップして指定することもできます）';
-  if (!db.start) return;
-  L.circle([db.start.lat, db.start.lng], {
+  const st = db.start;
+  $('#start-label').textContent = st ? `出発地：${st.label}` : '出発地：未設定（上のボタン・住所で決めるか、地図をタップしてください）';
+  // 出発地の決め方は選択式。選んでいる方のボタンの色を変える
+  $('#btn-locate').setAttribute('aria-pressed', String(st?.source === 'gps'));
+  $('#btn-mapcenter').setAttribute('aria-pressed', String(st?.source === 'map'));
+  $('#tab-badge-settings').textContent = `${db.settings.chains.length}種類`;
+  if (!st) return;
+  L.circle([st.lat, st.lng], {
     radius: db.settings.radius * 1000, color: '#0068b7', weight: 1, fillOpacity: 0.04, interactive: false,
   }).addTo(layers.start);
-  L.marker([db.start.lat, db.start.lng], { icon: pinIcon('#c2255c', '🏠'), zIndexOffset: 1000 })
-    .bindPopup(`出発地<br>${esc(db.start.label)}`)
+  L.marker([st.lat, st.lng], { icon: pinIcon('#c2255c', '🏠'), zIndexOffset: 1000 })
+    .bindPopup(`出発地<br>${esc(st.label)}`)
     .addTo(layers.start);
+}
+
+// 出発地や半径を変えたあと、店舗を検索し直す必要があるかを半径スライダーのすぐ下に出す
+function renderSearchHint() {
+  const covers = searchCovers();
+  const stores = visibleStores();
+  let html = '';
+  let quiet = true;
+  if (!db.start) {
+    html = '';
+  } else if (covers) {
+    const counts = Object.entries(CHAINS)
+      .map(([k, c]) => [c.label, stores.filter((s) => s.chain === k).length])
+      .filter(([, n]) => n);
+    html = stores.length
+      ? `✔ 範囲内に ${stores.length}店（${counts.map(([label, n]) => `${label} ${n}`).join('・')}）`
+      : '範囲内に店がありません。半径を広げるか、「設定」タブでコンビニの種類を増やしてください';
+    if (db.searched.radius > db.settings.radius) html += '<br>半径を狭めたので、範囲外の店は外しています（検索し直す必要はありません）';
+  } else if (db.searchedAt) {
+    html = `<span>⚠ 出発地か半径を変えたので、店舗を検索し直してください</span>
+      <button class="btn small primary" type="button" data-action="search">🔍 検索し直す</button>`;
+    quiet = false;
+  } else {
+    html = 'まだ店舗を検索していません。「計画を作る」を押すと、先に自動で検索します';
+  }
+  const hint = $('#store-hint');
+  hint.innerHTML = html;
+  hint.classList.toggle('quiet', quiet);
+  $('#tab-badge-search').textContent = covers ? `${stores.length}店` : db.start ? `${db.settings.radius}km` : '';
 }
 
 function renderStores() {
   layers.stores.clearLayers();
   markers.clear();
+  const r = db.route;
   const stores = visibleStores();
   const records = currentRecords();
-  const routeIndex = new Map((db.route?.stops ?? []).map((s, i) => [s.id, i + 1]));
-  const list = $('#store-list');
-
+  const planNo = new Map((r?.stops ?? []).map((s, i) => [s.id, i + 1]));
   $('#store-count').textContent = stores.length ? `${stores.filter((s) => !db.excluded[s.id]).length} / ${stores.length}` : '';
 
-  if (!stores.length) {
-    const msg = !db.start ? '出発地を指定してから検索してください'
-      : db.searchedAt ? '該当する店舗がありません。地図をタップすると手動で追加できます'
-        : '「店舗を検索」を押してください';
-    list.innerHTML = `<li class="empty">${msg}</li>`;
-    return;
+  // 計画の店は、出発地を変えて範囲から外れても、巡回中に見えるように地図に残す
+  const shown = new Set(stores.map((s) => s.id));
+  const onMap = [...stores, ...(r?.stops ?? []).filter((s) => !shown.has(s.id))];
+  for (const s of onMap) {
+    const done = !!records[s.id]?.status;
+    const marker = L.marker([s.lat, s.lng], {
+      // 番号は巡回の一覧と同じ。計画に無い記録済みの店だけ ✓
+      icon: storeIcon(s.chain, planNo.get(s.id) ?? (done ? '✓' : ''), { done, faded: !!db.excluded[s.id] }),
+    }).bindPopup(() => storePopup(s)).addTo(layers.stores);
+    markers.set(s.id, marker);
   }
 
-  list.innerHTML = stores.map((s) => {
+  // 回る順番に並べ、計画に入らない店は後ろに近い順
+  const byPlanOrder = (a, b) => (planNo.get(a.id) ?? 1e9) - (planNo.get(b.id) ?? 1e9);
+  $('#store-list').innerHTML = !stores.length ? '<li class="empty">範囲内に店がありません</li>' : [...stores].sort(byPlanOrder).map((s) => {
     const excluded = !!db.excluded[s.id];
     const st = STATUSES[records[s.id]?.status];
+    const no = excluded ? null : planNo.get(s.id);
+    const planTag = !r || r.stale || excluded || no || st ? '' : '<span class="tag muted">計画外</span>';
     return `
       <li class="store${excluded ? ' off' : ''}" data-id="${esc(s.id)}">
         <label class="store-main">
           <input type="checkbox" data-action="toggle"${excluded ? '' : ' checked'}>
-          <span class="chain-icon">${CHAINS[s.chain].icon}</span>
+          ${storeMark(s, no, { done: !!st })}
           <span class="store-name">${esc(s.name)}</span>
         </label>
+        ${planTag}
         ${st ? `<span class="tag ${st.tone === 'ok' ? 'ok' : 'ng'}">${st.icon}${st.label}</span>` : ''}
         <span class="muted small">${db.start ? fmtDist(haversine(db.start, s)) : ''}</span>
         <button class="icon-btn" type="button" data-action="focus" title="地図で見る">🗺</button>
         ${s.custom ? '<button class="icon-btn" type="button" data-action="delete" title="削除">✕</button>' : ''}
       </li>`;
   }).join('');
-
-  for (const s of stores) {
-    const done = !!records[s.id]?.status;
-    const marker = L.marker([s.lat, s.lng], {
-      icon: storeIcon(s.chain, done ? '✓' : routeIndex.get(s.id), { done, faded: !!db.excluded[s.id] }),
-    }).bindPopup(() => storePopup(s)).addTo(layers.stores);
-    markers.set(s.id, marker);
-  }
 }
 
-function renderRoute() {
-  layers.route.clearLayers();
-  const r = db.route;
-  $('#nav-card').hidden = !r;
-  if (!r) {
-    $('#route-summary').innerHTML = '';
-    return;
-  }
-
-  L.polyline(r.coords, { color: '#c2255c', weight: 5, opacity: 0.75, interactive: false }).addTo(layers.route);
-
-  const records = currentRecords();
-  const dwellSec = db.settings.dwell * 60;
+// 出発時刻・滞在から、各店の到着時刻と合計を出す
+function routeTimes(r) {
+  const dwellSec = (r.dwell ?? db.settings.dwell) * 60;
   const [hh, mm] = (r.startTime || nowHHMM()).split(':').map(Number);
   const departAt = new Date();
   departAt.setHours(hh, mm, 0, 0);
-
   let elapsed = 0;
   let drive = 0;
   let dist = 0;
-  const etas = r.stops.map((_, i) => {
+  const arrivals = r.stops.map((_, i) => {
     elapsed += r.legs[i].duration;
     drive += r.legs[i].duration;
     dist += r.legs[i].distance;
@@ -663,66 +849,135 @@ function renderRoute() {
     elapsed += dwellSec;
     return arrive;
   });
-  let backAt = null;
-  const returnLeg = r.roundtrip ? r.legs[r.stops.length] : null;
-  if (returnLeg) {
-    elapsed += returnLeg.duration;
-    drive += returnLeg.duration;
-    dist += returnLeg.distance;
-    backAt = new Date(departAt.getTime() + elapsed * 1000);
+  const back = r.roundtrip ? r.legs[r.stops.length] : null;
+  if (back) {
+    elapsed += back.duration;
+    drive += back.duration;
+    dist += back.distance;
   }
-  const endAt = new Date(departAt.getTime() + elapsed * 1000);
+  return { departAt, arrivals, back, drive, dist, elapsed, endAt: new Date(departAt.getTime() + elapsed * 1000) };
+}
 
-  $('#route-summary').innerHTML = `
+// 巡回で記録のボタンを開いている店。null なら次に回る店、'' なら開かない
+let navOpenStore = null;
+let navOpenShown = null;
+
+function renderRoute() {
+  layers.route.clearLayers();
+  const r = db.route;
+  $('#nav-empty').hidden = !!r;
+  $('#nav-body').hidden = !r;
+  // 計画タブの回る店の一覧と「次へ：巡回へ →」は、計画を作ってから出す
+  $('#plan-empty').hidden = !!r;
+  $('#plan-result').hidden = !r;
+  $('#btn-goto-nav').disabled = !r;
+  $('#nav-card').classList.toggle('stale', !!r?.stale);
+  if (!r) {
+    for (const id of ['#plan-summary', '#plan-stale', '#plan-list', '#gmaps-links']) $(id).innerHTML = '';
+    for (const id of ['#progress', '#tab-badge-plan', '#tab-badge-nav']) $(id).textContent = '';
+    return;
+  }
+
+  L.polyline(r.coords, { color: '#c2255c', weight: 5, opacity: 0.75, interactive: false }).addTo(layers.route);
+
+  const t = routeTimes(r);
+  const records = currentRecords();
+  const home = r.home ?? r.start;
+  $('#tab-badge-plan').textContent = r.stale ? '⚠ 古い' : `${fmtClock(t.endAt)}${r.roundtrip ? '帰着' : '終了'}`;
+
+  const summaryBody = `
     <div class="summary">
       <div><span class="big">${r.stops.length}</span><span class="label">店舗</span></div>
-      <div><span class="big">${fmtDur(drive)}</span><span class="label">運転時間</span></div>
-      <div><span class="big">${fmtDist(dist)}</span><span class="label">走行距離</span></div>
+      <div><span class="big">${fmtDur(t.drive)}</span><span class="label">運転時間</span></div>
+      <div><span class="big">${fmtClock(t.endAt)}</span><span class="label">${r.roundtrip ? '帰着' : '終了'}</span></div>
     </div>
-    <p class="small">滞在時間込みで約${fmtDur(elapsed)}（${fmtClock(departAt)}出発 → ${fmtClock(endAt)}${r.roundtrip ? '帰着' : '終了'}）</p>
+    <p class="small">${fmtClock(t.departAt)} ${esc(r.start.label)}から ・ 走行 ${fmtDist(t.dist)} ・ 滞在込みで約${fmtDur(t.elapsed)}</p>
     ${r.savedSec >= 60 ? `<p class="small ok">近い店から順に回るより約${fmtDur(r.savedSec)}短縮</p>` : ''}
-    ${r.orderSource === 'straight' ? '<p class="small warn">道路データを取得できなかったため、直線距離をもとに順番を決めました</p>' : ''}
-    ${r.stale ? '<p class="small warn">⚠ 店舗や設定が変わりました。ルートを再計算してください</p>' : ''}`;
+    ${r.orderSource === 'straight' ? '<p class="small warn">道路データを取得できなかったため、直線距離をもとに順番を決めました</p>' : ''}`;
+  // 古い計画の数字を、いまの計画のように並べない。一番上に作り直すよう出し、前の数字は畳んでおく
+  $('#plan-stale').innerHTML = r.stale
+    ? '<div class="stale-banner"><div>⚠ この計画は古くなっています。作ったあとに出発地・店舗・設定が変わりました。「計画を作る」で作り直してください。</div></div>'
+    : '';
+  $('#plan-summary').innerHTML = r.stale
+    ? `<details class="old-plan"><summary class="small">前に作った計画を見る（古い）</summary>${summaryBody}</details>`
+    : summaryBody;
+
+  // 回っている最中に予定が勝手に変わると混乱するので、自動では組み直さない
+  const banner = $('#stale-banner');
+  banner.hidden = !r.stale;
+  if (r.stale) {
+    banner.innerHTML = `
+      <div>⚠ 計画を作ったあとに出発地・店舗・設定が変わったため、この計画は古いままです。</div>
+      <button class="btn primary block" type="button" data-action="replan">🔄 現在地から今の時刻で組み直す（記録済みの店を除く）</button>`;
+  }
 
   const doneCount = r.stops.filter((s) => records[s.id]?.status).length;
   $('#progress').textContent = `${doneCount} / ${r.stops.length} 完了`;
+  $('#tab-badge-nav').textContent = `${doneCount}/${r.stops.length}`;
 
-  const next = r.stops.find((s) => !records[s.id]?.status);
+  const nextIndex = r.stops.findIndex((s) => !records[s.id]?.status);
+  const next = r.stops[nextIndex];
+  const nextTarget = next ?? (r.roundtrip ? home : null);
   const btnNext = $('#btn-next');
-  const nextTarget = next ?? (r.roundtrip ? r.start : null);
-  btnNext.textContent = next ? `▶ 次へ：${next.name}` : r.roundtrip ? '🏠 出発地へ戻る' : '🎉 全店舗まわりました';
+  btnNext.textContent = next
+    ? `▶ 次へ：${next.name}（${fmtClock(t.arrivals[nextIndex])}着の予定）`
+    : r.roundtrip ? '🏠 出発地へ戻る' : '🎉 全店舗まわりました';
   btnNext.classList.toggle('disabled', !nextTarget);
   if (nextTarget) btnNext.href = navUrl(nextTarget);
   else btnNext.removeAttribute('href');
 
-  $('#route-list').innerHTML = r.stops.map((s, i) => {
+  // 店の行は 1 行にまとめ、記録のボタンとメモは「次に回る店」か「記録 ▾」で開いた店だけに出す
+  navOpenShown = navOpenStore ?? next?.id ?? null;
+  const startRow = `
+    <li class="tl-station">
+      <span class="num square" style="--c:var(--accent)">🚩</span>
+      <div class="stop-info">
+        <div class="store-name">${esc(r.start.label)}</div>
+        <div class="muted small">${fmtClock(t.departAt)} 出発</div>
+      </div>
+    </li>`;
+  const storeRows = r.stops.map((s, i) => {
     const rec = records[s.id];
+    const st = STATUSES[rec?.status];
+    const open = s.id === navOpenShown;
+    const leg = r.legs[i];
     return `
-      <li class="stop${rec?.status ? ' done' : ''}" data-id="${esc(s.id)}">
+      <li class="stop${rec?.status ? ' done' : ''}${open ? ' open' : ''}" data-id="${esc(s.id)}">
         <div class="stop-head">
-          <span class="num" style="--c:${CHAINS[s.chain].color}">${i + 1}</span>
+          ${storeMark(s, i + 1, { done: !!rec?.status })}
           <div class="stop-info">
             <div class="store-name">${esc(s.name)}</div>
-            <div class="muted small">${fmtClock(etas[i])}着 ・ ${fmtDur(r.legs[i].duration)} ・ ${fmtDist(r.legs[i].distance)}</div>
+            <div class="stop-sub muted small">🚗${fmtDur(leg.duration)}・${fmtDist(leg.distance)} → <b>${fmtClock(t.arrivals[i])}</b>着${st ? ` <span class="tag ${st.tone === 'ok' ? 'ok' : 'ng'}">${st.icon}${st.label}</span>` : ''}${rec?.note ? ` 📝${esc(rec.note)}` : ''}</div>
           </div>
-          <a class="btn small primary" href="${esc(navUrl(s))}" target="_blank" rel="noopener">ナビ</a>
+          ${rec?.status ? '' : `<a class="btn small primary" href="${esc(navUrl(s))}" target="_blank" rel="noopener">ナビ</a>`}
+          <button class="btn small ghost" type="button" data-action="toggle-store" aria-expanded="${open}">記録 ${open ? '▴' : '▾'}</button>
         </div>
-        <div class="status-row">
-          ${Object.entries(STATUSES).map(([key, st]) => `<button type="button" class="chip${rec?.status === key ? ` on ${st.tone}` : ''}" data-action="status" data-status="${key}">${st.icon} ${st.label}</button>`).join('')}
-        </div>
-        <input class="note" type="text" data-action="note" placeholder="メモ（残り枚数・購入数など）" value="${esc(rec?.note)}">
+        ${open ? `
+        <div class="stop-detail">
+          <div class="status-row">
+            ${Object.entries(STATUSES).map(([key, s2]) => `<button type="button" class="chip${rec?.status === key ? ` on ${s2.tone}` : ''}" data-action="status" data-status="${key}">${s2.icon} ${s2.label}</button>`).join('')}
+          </div>
+          <input class="note" type="text" data-action="note" placeholder="メモ（残り枚数・購入数など）" value="${esc(rec?.note)}">
+        </div>` : ''}
       </li>`;
-  }).join('') + (returnLeg ? `
-      <li class="stop">
-        <div class="stop-head">
-          <span class="num" style="--c:#c2255c">🏠</span>
-          <div class="stop-info">
-            <div class="store-name">出発地に戻る</div>
-            <div class="muted small">${fmtClock(backAt)}着 ・ ${fmtDur(returnLeg.duration)} ・ ${fmtDist(returnLeg.distance)}</div>
-          </div>
-          <a class="btn small" href="${esc(navUrl(r.start))}" target="_blank" rel="noopener">ナビ</a>
-        </div>
-      </li>` : '');
+  }).join('');
+  const endRow = t.back ? `
+    <li class="tl-station">
+      <span class="num square" style="--c:var(--accent)">🏠</span>
+      <div class="stop-info">
+        <div class="store-name">出発地に戻る</div>
+        <div class="muted small">🚗${fmtDur(t.back.duration)}・${fmtDist(t.back.distance)} → <b>${fmtClock(t.endAt)}</b>着</div>
+      </div>
+      <a class="btn small" href="${esc(navUrl(home))}" target="_blank" rel="noopener">ナビ</a>
+    </li>` : `
+    <li class="tl-station">
+      <span class="num square" style="--c:#495057">🏁</span>
+      <div class="stop-info">
+        <div class="store-name">終了</div>
+        <div class="muted small">${fmtClock(t.endAt)}（最後の店を出る時刻）</div>
+      </div>
+    </li>`;
+  $('#plan-list').innerHTML = startRow + storeRows + endRow;
 
   const links = gmapsChunkLinks(r, records);
   $('#gmaps-links').innerHTML = links.length
@@ -733,9 +988,10 @@ function renderRoute() {
 
 // 未訪問の店舗を、Googleマップの経由地上限ごとに分割したリンクにする
 function gmapsChunkLinks(r, records) {
+  const home = r.home ?? r.start;
   const points = [
     ...r.stops.filter((s) => !records[s.id]?.status),
-    ...(r.roundtrip ? [{ ...r.start, name: '出発地' }] : []),
+    ...(r.roundtrip ? [{ ...home, name: '出発地' }] : []),
   ];
   const links = [];
   let origin = null; // 最初のリンクは現在地から
@@ -754,11 +1010,97 @@ function gmapsChunkLinks(r, records) {
   return links;
 }
 
+// 計画タブの上に、設定タブで決めた条件を出す（設定を別のタブに分けたので、何で計画するかを見えるようにする）
+function renderPlanConditions() {
+  const s = db.settings;
+  const kinds = s.chains.map((k) => CHAINS[k].label).join('・') || '（コンビニの種類が選ばれていません）';
+  $('#plan-conditions').innerHTML = [
+    s.campaign ? `🎯 ${esc(s.campaign)}` : '',
+    `🕒 ${esc($('#start-time').value || nowHHMM())} 出発・${db.start ? `${esc(db.start.label)}から半径 ${s.radius}km` : '出発地は未設定'}`,
+    `🏪 ${esc(kinds)}`,
+    `滞在 ${s.dwell}分${s.roundtrip ? '・出発地へ戻る' : ''}${s.skipRecorded ? '・記録済みの店を除く' : ''}`,
+  ].filter(Boolean).map((line) => `<span>${line}</span>`).join('');
+}
+
 function renderRecordSummary() {
   const recs = Object.values(currentRecords()).filter((r) => r.status);
   $('#record-summary').textContent = recs.length
-    ? `記録：${Object.entries(STATUSES).map(([k, st]) => `${st.icon}${st.label} ${recs.filter((r) => r.status === k).length}`).join('　')}`
+    ? `このくじのこれまでの記録：${Object.entries(STATUSES).map(([k, st]) => `${st.icon}${st.label} ${recs.filter((r) => r.status === k).length}`).join('　')}`
     : '';
+}
+
+// ===== 実績を送る =====
+// 記録を文章にして、メールアプリ・共有メニュー・コピーで送る（サイトから自動でメールは送らない）
+function reportClock(at) {
+  const d = new Date(at);
+  const hm = fmtClock(d);
+  return d.toDateString() === new Date().toDateString() ? hm : `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
+}
+
+function buildReport() {
+  const campaign = campaignKey();
+  const records = currentRecords();
+  const recorded = Object.entries(records).filter(([, r]) => r.status || r.note);
+  const counts = Object.entries(STATUSES).map(([k, st]) => `${st.icon}${st.label} ${recorded.filter(([, r]) => r.status === k).length}`);
+  const now = new Date();
+  const stamp = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())} ${fmtClock(now)}`;
+
+  const byId = new Map([...db.stores, ...db.custom, ...(db.route?.stops ?? [])].map((s) => [s.id, s]));
+  const line = (id, r) => {
+    const st = STATUSES[r.status];
+    return `・${st ? `${st.icon} ${st.label}` : '📝 メモ'}　${byId.get(id)?.name ?? '（名前不明の店）'}${r.at ? `（${reportClock(r.at)}）` : ''}${r.note ? `　メモ: ${r.note}` : ''}`;
+  };
+  const planIds = (db.route?.stops ?? []).map((s) => s.id);
+  const inPlan = planIds.filter((id) => records[id]?.status || records[id]?.note).map((id) => line(id, records[id]));
+  const others = recorded.filter(([id]) => !planIds.includes(id)).map(([id, r]) => line(id, r));
+  const sections = [
+    inPlan.length ? `■ 計画の店（回る順）\n${inPlan.join('\n')}` : '',
+    others.length ? `■ 計画にない店\n${others.join('\n')}` : '',
+  ].filter(Boolean);
+
+  const subject = `【コンビニ巡回】${campaign} の記録（${stamp}）`;
+  const body = [
+    `くじ・グッズ: ${campaign}`,
+    `記録: ${counts.join(' ／ ')}`,
+    '',
+    sections.length ? sections.join('\n\n') : '（まだ記録はありません）',
+    '',
+    `— コンビニ巡回ルート ${APP_URL}`,
+  ].join('\n');
+  return { subject, body, count: recorded.length };
+}
+
+function mailtoUrl(to, { subject, body }) {
+  const text = body.length > MAILTO_MAX ? `${body.slice(0, MAILTO_MAX)}\n…（長いので途中まで。全文は「コピー」で貼り付けてください）` : body;
+  return `mailto:${encodeURIComponent(to.trim())}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(text)}`;
+}
+
+async function copyReport({ subject, body }) {
+  const text = `${subject}\n\n${body}`;
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    // http の手元確認や古いブラウザでは clipboard API が使えないので、選択してコピーする
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.append(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    if (!ok) throw new Error('コピーできませんでした');
+  }
+}
+
+function renderReport() {
+  const report = buildReport();
+  $('#report-count').textContent = report.count ? `記録 ${report.count}件` : 'まだ記録がありません';
+  const mail = $('#btn-report-mail');
+  mail.href = mailtoUrl(db.settings.reportTo, report);
+  mail.classList.toggle('disabled', !report.count);
+  $('#btn-report-share').hidden = typeof navigator.share !== 'function';
+  $('#report-preview').textContent = `${report.subject}\n\n${report.body}`;
 }
 
 function syncControls() {
@@ -770,26 +1112,85 @@ function syncControls() {
   $('#roundtrip').checked = s.roundtrip;
   $('#skip-recorded').checked = s.skipRecorded;
   $('#campaign').value = s.campaign;
-  $('#start-time').value = db.route?.startTime || nowHHMM();
+  $('#report-to').value = s.reportTo;
+  $('#start-time').value = nowHHMM();
+}
+
+// ===== タブ =====
+// カードを 1 枚ずつ出し、設定 → エリア → 計画 → 巡回 と左から右へ進む段階として見せる
+let startTimeTouched = false; // 出発時刻を利用者が変えたか。変えていなければ、タブを開くたびに今に合わせる
+
+function setTab(name) {
+  const tab = TABS.includes(name) ? name : 'settings';
+  db.ui.tab = tab;
+  save();
+  const current = TABS.indexOf(tab);
+  document.querySelectorAll('.tab').forEach((b) => {
+    const i = TABS.indexOf(b.dataset.tab);
+    b.setAttribute('aria-selected', String(i === current));
+    b.dataset.state = i < current ? 'past' : i === current ? 'current' : 'future';
+    if (i === current) b.setAttribute('aria-current', 'step');
+    else b.removeAttribute('aria-current');
+  });
+  document.querySelectorAll('.panel > [data-panel]').forEach((s) => s.classList.toggle('active', s.dataset.panel === tab));
+  if ((tab === 'settings' || tab === 'plan') && !startTimeTouched) $('#start-time').value = nowHHMM();
+  if (tab === 'plan') renderPlanConditions();
+  // 切り替えた画面の先頭が見えるように戻す（PC はパネルだけがスクロールし、スマホは画面全体がスクロールする）
+  const panel = $('.panel');
+  if (getComputedStyle(panel).overflowY === 'auto') {
+    panel.scrollTop = 0;
+  } else {
+    const top = panel.getBoundingClientRect().top + window.scrollY;
+    if (window.scrollY > top) window.scrollTo({ top });
+  }
+}
+
+// ===== 全部クリア =====
+// 出発地・見つけた店・計画・外した店をまとめて消す。設定・くじの記録・手動で追加した店は、確認のチェックを入れたときだけ消す
+function openClearAll() {
+  if (blockedWhileSearching()) return;
+  $('#clear-everything').checked = false;
+  $('#clear-ok').textContent = 'クリアする';
+  $('#confirm').hidden = false;
+  $('#clear-cancel').focus();
+}
+
+function closeClearAll() {
+  $('#confirm').hidden = true;
+}
+
+function clearAll(everything) {
+  const keep = everything ? {} : { settings: db.settings, records: db.records, custom: db.custom };
+  for (const k of Object.keys(db)) delete db[k];
+  Object.assign(db, structuredClone(DEFAULTS), keep);
+  startTimeTouched = false;
+  navOpenStore = null;
+  $('#addr-input').value = '';
+  save();
+  syncControls();
+  renderAll();
+  setTab('settings');
+  toast(everything ? '最初の状態に戻しました' : '出発地・計画・見つけた店をクリアしました（設定と記録は残しています）', 5000);
 }
 
 // ===== イベント =====
-$('#btn-locate').addEventListener('click', (e) => withBusy(e.currentTarget, '取得中…', async () => {
-  setStart({ ...(await getPosition()), label: '現在地' });
-}));
-
-$('#addr-form').addEventListener('submit', (e) => {
-  e.preventDefault();
-  const q = $('#addr-input').value.trim();
-  if (!q) return;
-  withBusy(e.currentTarget.querySelector('button'), '…', async () => setStart(await geocode(q)));
+$('.tabs').addEventListener('click', (e) => {
+  const btn = e.target.closest('.tab');
+  if (btn) setTab(btn.dataset.tab);
 });
 
-$('#radius').addEventListener('input', (e) => {
-  db.settings.radius = Number(e.target.value);
-  $('#radius-out').textContent = db.settings.radius;
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-goto]');
+  if (btn) setTab(btn.dataset.goto);
+});
+
+$('#busy-cancel').addEventListener('click', () => searchAbort?.abort());
+
+// 設定タブ
+$('#campaign').addEventListener('change', (e) => {
+  db.settings.campaign = e.target.value;
   save();
-  renderStart();
+  renderAll();
 });
 
 document.querySelectorAll('input[name=chain]').forEach((el) => el.addEventListener('change', () => {
@@ -799,47 +1200,70 @@ document.querySelectorAll('input[name=chain]').forEach((el) => el.addEventListen
   renderAll();
 }));
 
-$('#btn-search').addEventListener('click', (e) => withBusy(e.currentTarget, '検索中…', searchStores));
-$('#btn-route').addEventListener('click', (e) => withBusy(e.currentTarget, '計算中…', () => computeRoute(false)));
-$('#btn-reroute').addEventListener('click', (e) => withBusy(e.currentTarget, '計算中…', () => computeRoute(true)));
-
-$('#campaign').addEventListener('change', (e) => {
-  db.settings.campaign = e.target.value;
+$('#start-time').addEventListener('change', () => {
+  startTimeTouched = true;
+  markRouteStale();
   save();
   renderAll();
 });
 
-$('#start-time').addEventListener('change', (e) => {
-  if (!db.route) return;
-  db.route.startTime = e.target.value;
-  save();
-  renderRoute();
-});
-
 $('#dwell').addEventListener('input', (e) => {
-  db.settings.dwell = Math.max(0, Number(e.target.value) || 0);
+  db.settings.dwell = Math.min(60, Math.max(0, Number(e.target.value) || 0));
+  markRouteStale();
   save();
-  renderRoute();
+  renderAll();
 });
 
 $('#roundtrip').addEventListener('change', (e) => {
   db.settings.roundtrip = e.target.checked;
   markRouteStale();
   save();
-  renderRoute();
+  renderAll();
 });
 
 $('#skip-recorded').addEventListener('change', (e) => {
   db.settings.skipRecorded = e.target.checked;
   save();
+  renderPlanConditions();
 });
 
-$('#btn-reset-records').addEventListener('click', () => {
-  if (!confirm(`「${campaignKey()}」の記録をすべて消去しますか？`)) return;
-  delete db.records[campaignKey()];
+// エリアタブ
+$('#btn-locate').addEventListener('click', (e) => withBusy(e.currentTarget, '📍 取得中…', async () => {
+  const pos = await getPosition();
+  setStart({ lat: pos.lat, lng: pos.lng, label: '現在地', source: 'gps' });
+  toast(`現在地を出発地にしました${pos.accuracy ? `（誤差 約${Math.round(pos.accuracy)}m）` : ''}`);
+}));
+
+$('#btn-mapcenter').addEventListener('click', () => {
+  const c = map.getCenter();
+  setStart({ lat: c.lat, lng: c.lng, label: '地図の中心', source: 'map' }, { fit: false });
+  toast('地図の中心を出発地にしました');
+});
+
+$('#addr-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const q = $('#addr-input').value.trim();
+  if (!q) return;
+  withBusy(e.currentTarget.querySelector('button'), '…', async () => setStart({ ...(await geocode(q)), source: 'address' }));
+});
+
+$('#radius').addEventListener('input', (e) => {
+  db.settings.radius = Number(e.target.value);
+  $('#radius-out').textContent = db.settings.radius;
+  markRouteStale();
   save();
   renderAll();
 });
+
+$('#btn-search').addEventListener('click', (e) => withBusy(e.currentTarget, '検索中…', () => searchStores()));
+
+$('#store-hint').addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-action=search]');
+  if (btn) withBusy(btn, '検索中…', () => searchStores());
+});
+
+// 計画タブ
+$('#btn-plan').addEventListener('click', (e) => withBusy(e.currentTarget, '計画中…', () => computePlan(false)));
 
 $('#store-list').addEventListener('change', (e) => {
   const id = e.target.closest('[data-id]')?.dataset.id;
@@ -851,10 +1275,7 @@ $('#store-list').addEventListener('click', (e) => {
   const id = btn?.closest('[data-id]')?.dataset.id;
   if (!id) return;
   if (btn.dataset.action === 'focus') {
-    const marker = markers.get(id);
-    map.setView(marker.getLatLng(), Math.max(map.getZoom(), 15));
-    marker.openPopup();
-    $('#map').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    focusStore(id);
   } else if (btn.dataset.action === 'delete') {
     db.custom = db.custom.filter((s) => s.id !== id);
     markRouteStale();
@@ -863,20 +1284,99 @@ $('#store-list').addEventListener('click', (e) => {
   }
 });
 
-$('#route-list').addEventListener('click', (e) => {
-  const btn = e.target.closest('button[data-action=status]');
-  const id = btn?.closest('[data-id]')?.dataset.id;
-  if (id) setStatus(id, btn.dataset.status);
+// 巡回タブ
+$('#plan-list').addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-action]');
+  if (!btn) {
+    // 店の行（ボタン・メモ・ナビ以外）を押したら、地図でその店を示す
+    const row = e.target.closest('.stop[data-id]');
+    if (row && !e.target.closest('a, input, button')) focusStore(row.dataset.id);
+    return;
+  }
+  const id = btn.closest('[data-id]')?.dataset.id;
+  if (!id) return;
+  if (btn.dataset.action === 'status') {
+    navOpenStore = null; // 記録したら、次に回る店の記録を開く
+    setStatus(id, btn.dataset.status);
+  } else if (btn.dataset.action === 'toggle-store') {
+    navOpenStore = id === navOpenShown ? '' : id;
+    renderRoute();
+  }
 });
 
-$('#route-list').addEventListener('change', (e) => {
+$('#plan-list').addEventListener('change', (e) => {
   const id = e.target.closest('[data-id]')?.dataset.id;
   if (id && e.target.dataset.action === 'note') setNote(id, e.target.value);
+});
+
+$('#stale-banner').addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-action=replan]');
+  if (btn) withBusy(btn, '確認中…', () => computePlan(true));
+});
+
+$('#btn-reroute').addEventListener('click', (e) => withBusy(e.currentTarget, '確認中…', () => computePlan(true)));
+
+$('#btn-reset-records').addEventListener('click', () => {
+  if (!confirm(`「${campaignKey()}」の記録をすべて消去しますか？`)) return;
+  delete db.records[campaignKey()];
+  save();
+  renderAll();
+});
+
+// 実績を送る（宛先はこの端末の localStorage にだけ保存する）
+$('#report-to').addEventListener('change', (e) => {
+  db.settings.reportTo = e.target.value.trim();
+  save();
+  renderReport();
+});
+
+$('#btn-report-mail').addEventListener('click', (e) => {
+  if (!buildReport().count) {
+    e.preventDefault();
+    toast('まだ記録がありません');
+  }
+});
+
+$('#btn-report-share').addEventListener('click', (e) => withBusy(e.currentTarget, '共有中…', async () => {
+  const { subject, body } = buildReport();
+  try {
+    await navigator.share({ title: subject, text: `${subject}\n\n${body}` });
+  } catch (err) {
+    if (err.name !== 'AbortError') throw err; // 共有メニューを閉じただけなら何もしない
+  }
+}));
+
+$('#btn-report-copy').addEventListener('click', (e) => withBusy(e.currentTarget, 'コピー中…', async () => {
+  await copyReport(buildReport());
+  toast('記録をコピーしました。メールや LINE に貼り付けて送れます');
+}));
+
+// 全部クリア
+$('#btn-clear-all').addEventListener('click', openClearAll);
+$('#clear-cancel').addEventListener('click', closeClearAll);
+$('#clear-everything').addEventListener('change', (e) => {
+  $('#clear-ok').textContent = e.target.checked ? 'すべて消す' : 'クリアする';
+});
+$('#clear-ok').addEventListener('click', () => {
+  const everything = $('#clear-everything').checked;
+  closeClearAll();
+  clearAll(everything);
+});
+$('#confirm').addEventListener('click', (e) => { if (e.target.id === 'confirm') closeClearAll(); });
+
+// 見つからない・失敗したときの知らせ（画面中央）を閉じる: OK・暗い所を押す・Esc
+$('#notice-ok').addEventListener('click', closeNotice);
+$('#notice').addEventListener('click', (e) => { if (e.target.id === 'notice') closeNotice(); });
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  if (!$('#notice').hidden) closeNotice();
+  else if (!$('#confirm').hidden) closeClearAll();
 });
 
 // ===== 起動 =====
 document.querySelectorAll('.chain-icon[data-chain]').forEach((el) => { el.innerHTML = CHAINS[el.dataset.chain].icon; });
 syncControls();
 renderAll();
+setTab(db.ui.tab);
 if (db.route) fitRoute();
 else fitStart();

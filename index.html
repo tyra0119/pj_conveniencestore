@@ -7,32 +7,36 @@
   <meta name="theme-color" content="#0068b7">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
   <!-- ?v= は更新時にブラウザの古いキャッシュを使わせないためのもの。CSS/JS を変えたら上げる -->
-  <link rel="stylesheet" href="style.css?v=5">
+  <link rel="stylesheet" href="style.css?v=6">
 </head>
 <body>
   <header class="topbar">
     <h1>🏪 コンビニ巡回ルート</h1>
+    <button id="btn-clear-all" class="topbar-btn" type="button" title="出発地・計画・見つけた店をまとめて消す">🗑 クリア</button>
   </header>
 
   <div id="map"></div>
 
   <main class="panel">
-    <section class="card">
-      <h2><span class="step">1</span>出発地と範囲</h2>
-      <div class="row">
-        <button id="btn-locate" class="btn primary" type="button">📍 現在地</button>
-        <form id="addr-form" class="row grow">
-          <input id="addr-input" class="grow" type="search" placeholder="住所・地名で指定">
-          <button class="btn" type="submit">検索</button>
-        </form>
-      </div>
-      <p id="start-label" class="muted small"></p>
+    <!-- 画面の組み立ては ConveniRadar（電車版）にそろえている -->
+    <nav class="tabs" aria-label="画面の切り替え">
+      <button class="tab" type="button" data-tab="settings"><span class="tab-step">1</span><span class="tab-label">⚙ 設定</span><span id="tab-badge-settings" class="tab-badge"></span></button>
+      <button class="tab" type="button" data-tab="search"><span class="tab-step">2</span><span class="tab-label">🗺 エリア</span><span id="tab-badge-search" class="tab-badge"></span></button>
+      <button class="tab" type="button" data-tab="plan"><span class="tab-step">3</span><span class="tab-label">🗓 計画</span><span id="tab-badge-plan" class="tab-badge"></span></button>
+      <button class="tab" type="button" data-tab="nav"><span class="tab-step">4</span><span class="tab-label">🚗 巡回</span><span id="tab-badge-nav" class="tab-badge"></span></button>
+    </nav>
 
+    <section class="card" data-panel="settings">
+      <h2><span class="step">1</span>設定</h2>
+
+      <h3 class="subhead">くじ・グッズ</h3>
       <label class="field">
-        <span>半径 <output id="radius-out">5</output> km</span>
-        <input id="radius" type="range" min="1" max="30" step="1" value="5">
+        <span>くじ・グッズ名（記録の単位）</span>
+        <input id="campaign" type="text" placeholder="例：一番くじ ○○">
       </label>
+      <p id="record-summary" class="muted small"></p>
 
+      <h3 class="subhead">コンビニの種類</h3>
       <div class="chains">
         <label><input type="checkbox" name="chain" value="lawson"> <span class="chain-icon" data-chain="lawson"></span>ローソン</label>
         <label><input type="checkbox" name="chain" value="seven"> <span class="chain-icon" data-chain="seven"></span>セブン-イレブン</label>
@@ -40,51 +44,131 @@
         <label><input type="checkbox" name="chain" value="ministop"> <span class="chain-icon" data-chain="ministop"></span>ミニストップ</label>
       </div>
 
-      <button id="btn-search" class="btn primary block" type="button">🔍 店舗を検索</button>
-    </section>
-
-    <section class="card">
-      <h2><span class="step">2</span>巡回する店舗 <span id="store-count" class="badge"></span></h2>
-      <p class="muted small">チェックを外した店舗はルートから除外されます。地図に載っていない店舗は、地図をタップして追加できます。</p>
-      <ul id="store-list" class="store-list"></ul>
-    </section>
-
-    <section class="card">
-      <h2><span class="step">3</span>ルート作成</h2>
-      <label class="field">
-        <span>くじ・グッズ名（記録の単位）</span>
-        <input id="campaign" type="text" placeholder="例：一番くじ ○○">
-      </label>
-      <p id="record-summary" class="muted small"></p>
+      <h3 class="subhead">時刻と回り方</h3>
       <div class="grid2">
         <label class="field"><span>出発時刻</span><input id="start-time" type="time"></label>
         <label class="field"><span>1店あたりの滞在（分）</span><input id="dwell" type="number" min="0" max="60" inputmode="numeric"></label>
       </div>
+      <p class="muted small">出発時刻は、変えなければ、このタブや計画タブを開くたびに今に合わせます。</p>
       <label class="check"><input id="roundtrip" type="checkbox"> 最後に出発地へ戻る</label>
       <label class="check"><input id="skip-recorded" type="checkbox"> 記録済み（購入・売切れ等）の店舗を除く</label>
-      <button id="btn-route" class="btn primary block" type="button">🚗 最短ルートを計算</button>
-      <div id="route-summary"></div>
+
+      <button class="btn primary block" type="button" data-goto="search">次へ：エリアへ →</button>
     </section>
 
-    <section id="nav-card" class="card" hidden>
+    <section class="card" data-panel="search">
+      <h2><span class="step">2</span>どこを回るか</h2>
+      <div class="row wrap">
+        <button id="btn-locate" class="btn toggle" type="button" aria-pressed="false">📍 現在地を出発地に</button>
+        <button id="btn-mapcenter" class="btn toggle" type="button" aria-pressed="false">🗺 地図の中心を出発地に</button>
+      </div>
+      <form id="addr-form" class="row">
+        <input id="addr-input" class="grow" type="search" placeholder="住所・地名で指定">
+        <button class="btn" type="submit">検索</button>
+      </form>
+      <p id="start-label" class="muted small"></p>
+      <label class="field">
+        <span>出発地から半径 <output id="radius-out">5</output> km の店を回る</span>
+        <input id="radius" type="range" min="1" max="30" step="1" value="5">
+      </label>
+      <div id="store-hint" class="store-hint"></div>
+      <button id="btn-search" class="btn block" type="button">🔍 店舗を検索</button>
+      <p class="muted small">店舗データは OpenStreetMap のものです。載っていない店は、地図をタップして追加できます。</p>
+
+      <button class="btn primary block" type="button" data-goto="plan">次へ：計画へ →</button>
+    </section>
+
+    <section class="card" data-panel="plan">
+      <h2><span class="step">3</span>計画</h2>
+      <div id="plan-stale"></div>
+      <div class="plan-conditions">
+        <p id="plan-conditions" class="small grow"></p>
+        <button class="btn small ghost" type="button" data-goto="settings">⚙ 設定を変える</button>
+      </div>
+
+      <button id="btn-plan" class="btn primary block" type="button">🗓 計画を作る</button>
+      <p id="plan-empty" class="empty">「計画を作る」を押すと、回る店の一覧がここに出ます（店舗をまだ検索していなければ、先に検索します）</p>
+      <div id="plan-result" class="card-body" hidden>
+        <div id="plan-summary"></div>
+        <h3 class="subhead">回る店 <span id="store-count" class="badge"></span></h3>
+        <p class="muted small">アイコンの右上の番号は回る順番です（地図と同じ）。チェックを外した店は、次に「計画を作る」を押したときに外れます。</p>
+        <ul id="store-list" class="store-list"></ul>
+      </div>
+
+      <button id="btn-goto-nav" class="btn primary block" type="button" data-goto="nav" disabled>次へ：巡回へ →</button>
+    </section>
+
+    <section id="nav-card" class="card" data-panel="nav">
       <h2><span class="step">4</span>巡回 <span id="progress" class="badge"></span></h2>
-      <a id="btn-next" class="btn accent block big" target="_blank" rel="noopener"></a>
-      <ol id="route-list" class="route-list"></ol>
-      <div id="gmaps-links" class="links"></div>
-      <button id="btn-reroute" class="btn block" type="button">🔄 現在地から残りの店舗で再計算</button>
-      <button id="btn-reset-records" class="btn block ghost" type="button">このくじの記録をリセット</button>
+      <p id="nav-empty" class="empty">「計画」タブで計画を作ると、回る順番がここに出ます</p>
+      <div id="nav-body" class="card-body" hidden>
+        <div id="stale-banner" class="stale-banner" hidden></div>
+        <a id="btn-next" class="btn accent block big" target="_blank" rel="noopener"></a>
+        <ol id="plan-list" class="route-list"></ol>
+        <div id="gmaps-links" class="links"></div>
+        <button id="btn-reroute" class="btn block" type="button">🔄 現在地から残りの店で組み直す</button>
+        <button id="btn-reset-records" class="btn block ghost" type="button">このくじの記録をリセット</button>
+      </div>
+
+      <div class="report">
+        <div class="row"><b class="small">📧 実績を送る</b><span id="report-count" class="muted small grow"></span></div>
+        <label class="field">
+          <span>宛先メール（任意・この端末にだけ保存）</span>
+          <input id="report-to" type="email" inputmode="email" autocomplete="email" placeholder="例：自分のメールアドレス">
+        </label>
+        <div class="report-actions">
+          <a id="btn-report-mail" class="btn primary">✉ メールで送る</a>
+          <button id="btn-report-share" class="btn" type="button">📤 共有</button>
+          <button id="btn-report-copy" class="btn" type="button">📋 コピー</button>
+        </div>
+        <details>
+          <summary class="small">送る内容を見る</summary>
+          <pre id="report-preview" class="report-preview"></pre>
+        </details>
+        <p class="muted small">メールは、この端末のメールアプリから送ります（このサイトが自動で送ることはありません）。</p>
+      </div>
     </section>
 
-    <footer class="muted small">
-      地図・店舗データ © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap contributors</a> ／
-      道路距離 <a href="https://project-osrm.org/" target="_blank" rel="noopener">OSRM</a> ／
-      住所検索 <a href="https://www.gsi.go.jp/" target="_blank" rel="noopener">国土地理院</a>
+    <footer class="muted small attribution">
+      <p>
+        地図・店舗データ © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap contributors</a>（ODbL）／
+        道路距離 <a href="https://project-osrm.org/" target="_blank" rel="noopener">OSRM</a>／
+        住所検索 <a href="https://www.gsi.go.jp/" target="_blank" rel="noopener">国土地理院</a>
+      </p>
+      <p>チェーンのアイコンは配色をもとにした簡易なもので、各社の公式ロゴではありません。店舗データには、載っていない店舗や閉店済みの店舗があり得ます。</p>
     </footer>
   </main>
 
+  <div id="busy" class="busy-overlay" role="status" aria-live="polite" hidden>
+    <div class="busy-card">
+      <span class="spinner" aria-hidden="true"></span><span id="busy-text"></span>
+      <button id="busy-cancel" class="btn small" type="button" hidden>✋ 検索を中断</button>
+    </div>
+  </div>
+  <div id="notice" class="busy-overlay notice-overlay" role="alertdialog" aria-modal="true" aria-labelledby="notice-title" hidden>
+    <div class="busy-card notice-card">
+      <div id="notice-icon" class="notice-icon" aria-hidden="true">⚠</div>
+      <b id="notice-title"></b>
+      <p id="notice-text"></p>
+      <button id="notice-ok" class="btn primary block" type="button">OK</button>
+    </div>
+  </div>
+  <!-- 全部クリアの確認。記録と設定は、チェックを入れたときだけ消す -->
+  <div id="confirm" class="busy-overlay notice-overlay" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" hidden>
+    <div class="busy-card notice-card confirm-card">
+      <div class="notice-icon" aria-hidden="true">🗑</div>
+      <b id="confirm-title">全部クリアしますか？</b>
+      <p class="confirm-list">消すもの：出発地、見つけた店、計画、計画から外した店<br>残すもの：設定（くじ名・コンビニ・時刻など）、くじの記録、手動で追加した店</p>
+      <label class="check"><input id="clear-everything" type="checkbox"> 設定・くじの記録・手動で追加した店も消して、最初の状態に戻す（元に戻せません）</label>
+      <div class="confirm-actions">
+        <button id="clear-cancel" class="btn" type="button">キャンセル</button>
+        <button id="clear-ok" class="btn danger" type="button">クリアする</button>
+      </div>
+    </div>
+  </div>
   <div id="toast" class="toast" hidden></div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-  <script src="app.js?v=5"></script>
+  <script src="app.js?v=6"></script>
 </body>
 </html>
