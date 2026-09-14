@@ -319,9 +319,14 @@ function dedupe(stores) {
 // 一番くじ公式の「店舗検索」の結果を貼り付けたものを読み取る。店名の次の行が住所、というまとまりを 1 店とみなす。
 // リンク付きで貼られたとき（[店名](URL) の形や HTML）は Googleマップのリンクの座標を使い、無ければ住所から位置を調べる。
 // 公式サイトへはアプリから取りに行かない（robots.txt で店舗検索のデータの取得が禁止されている。貼り付けるのは利用者本人が見た結果）
-const PREF_RE = /^(北海道|東京都|京都府|大阪府|\S{2,3}県)/;
-const LIST_NOISE_RE = /^(ルートを確認する|店舗詳細へ|検索結果|検索条件|一番くじNaviとは|\d+件の店舗|お気に入り|TOPに戻る)/;
+const PREFECTURES = '北海道|青森県|岩手県|宮城県|秋田県|山形県|福島県|茨城県|栃木県|群馬県|埼玉県|千葉県|東京都|神奈川県|新潟県|富山県|石川県|福井県|山梨県|長野県|岐阜県|静岡県|愛知県|三重県|滋賀県|京都府|大阪府|兵庫県|奈良県|和歌山県|鳥取県|島根県|岡山県|広島県|山口県|徳島県|香川県|愛媛県|高知県|福岡県|佐賀県|長崎県|熊本県|大分県|宮崎県|鹿児島県|沖縄県';
+// 住所の始まり: 都道府県名のすぐ後に市区郡町村が続くところ（「兵庫県庁前店」のような店名の中の県名とは区別する）
+const ADDRESS_RE = new RegExp(`(?:${PREFECTURES})(?=\\S{0,6}?[市区郡町村])`);
+const LIST_NOISE_RE = /^(ルートを確認する|店舗詳細へ|検索結果|検索条件|一番くじNaviとは|\d+件の店舗|発売予定日|発売日|お気に入り|TOPに戻る)/;
 
+// 公式の店舗検索は、表示やコピーのしかたで形が変わる（2026-09-15 に 2 通りを確認）
+//   店名と住所が別の行:  ローソン 山の街店 ⏎ 兵庫県神戸市北区…
+//   店名と住所が 1 行:   ローソン 山の街店兵庫県神戸市北区…（住所の始まりで分ける）
 function parseShopList(text) {
   const linkRe = /\[([^\]]*)\]\((\S+?)\)/g;
   const lines = text.split(/\r?\n/).map((raw) => {
@@ -334,18 +339,29 @@ function parseShopList(text) {
     return { label, urls };
   }).filter((l) => l.label || l.urls.length);
 
+  const addressAt = (label) => ADDRESS_RE.exec(label ?? '')?.index ?? -1;
   const blocks = [];
   for (let i = 0; i < lines.length; i++) {
     const { label, urls } = lines[i];
     const next = lines[i + 1];
-    if (label && !LIST_NOISE_RE.test(label) && !PREF_RE.test(label) && next && PREF_RE.test(next.label)) {
+    const at = addressAt(label);
+    if (label && !LIST_NOISE_RE.test(label) && at !== 0 && next && addressAt(next.label) === 0) {
       blocks.push({ name: label, address: next.label, urls: [...urls, ...next.urls], soldOut: false });
       i++;
+    } else if (label && !LIST_NOISE_RE.test(label) && at > 0) {
+      blocks.push({ name: label.slice(0, at).trim(), address: label.slice(at).trim(), urls: [...urls], soldOut: false });
     } else if (blocks.length) {
       // 店のまとまりの残り（ルートのリンク・完売の表示）
       const cur = blocks.at(-1);
       cur.urls.push(...urls);
       if (/^完売/.test(label) && label.length < 10) cur.soldOut = true;
+    }
+  }
+
+  for (const b of blocks) {
+    if (/\s*完売$/.test(b.address)) {
+      b.address = b.address.replace(/\s*完売$/, '');
+      b.soldOut = true;
     }
   }
 
@@ -368,7 +384,14 @@ function parseShopList(text) {
 // コピーしたページの HTML から、リンク先（店舗の番号・Googleマップの座標）を残した文字にする
 function htmlToListText(html) {
   const doc = new DOMParser().parseFromString(html, 'text/html');
-  doc.querySelectorAll('a[href]').forEach((a) => a.replaceWith(`\n[${a.textContent.replace(/\s+/g, ' ').trim()}](${a.getAttribute('href')})\n`));
+  doc.querySelectorAll('a[href]').forEach((a) => {
+    // 1 つのリンクの中に店名と住所が別の要素で入っているときは、行を分けて残す
+    a.querySelectorAll('br').forEach((br) => br.replaceWith('\n'));
+    a.querySelectorAll('p, div, li, dt, dd, h1, h2, h3, h4, h5, h6').forEach((el) => el.append('\n'));
+    const href = a.getAttribute('href');
+    const parts = a.textContent.split('\n').map((t) => t.replace(/\s+/g, ' ').trim()).filter(Boolean);
+    a.replaceWith(`\n${parts.map((t) => `[${t}](${href})`).join('\n')}\n`);
+  });
   doc.querySelectorAll('br').forEach((br) => br.replaceWith('\n'));
   doc.querySelectorAll('li, p, div, tr, dt, dd, h1, h2, h3, h4').forEach((el) => el.append('\n'));
   return doc.body.textContent.split('\n').map((l) => l.trim()).filter(Boolean).join('\n');
@@ -409,7 +432,8 @@ async function importShopList(text) {
     for (const [i, s] of missing.entries()) {
       setBusy('import', `📍 住所から店の位置を調べています…（${i + 1}/${missing.length}）`);
       try {
-        const g = await geocode(normalizeAddress(s.address));
+        // 住所のあとの建物名や「※駐車場あり」などは、住所検索に渡さない
+        const g = await geocode(normalizeAddress(s.address.split(/[\s　※（(]/)[0]));
         s.lat = g.lat;
         s.lng = g.lng;
         s.approx = true; // 住所の番地までは合わないことがあり、実際の店から数百m ずれることがある
