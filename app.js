@@ -20,8 +20,15 @@ const CHAINS = {
   family: {
     label: 'ファミリーマート',
     color: '#2b8a3e',
-    re: /ファミリーマート|family\s?mart/i,
+    // サークルK・サンクスは国内全店がファミリーマートに転換済みだが、OSM に旧名のまま残っていることがある
+    re: /ファミリーマート|family\s?mart|サンクス|sunkus|サークル\s?K|circle\s?k/i,
     icon: '<svg viewBox="0 0 32 32" aria-hidden="true"><rect x="1" y="1" width="30" height="30" rx="7" fill="#fff" stroke="#fff" stroke-width="2"/><path d="M1 8a7 7 0 0 1 7-7h16a7 7 0 0 1 7 7v3H1z" fill="#0a8ad2"/><path d="M1 21h30v3a7 7 0 0 1-7 7H8a7 7 0 0 1-7-7z" fill="#00a73c"/><text x="16" y="20.3" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="11" font-weight="900" fill="#0a8ad2">F</text></svg>',
+  },
+  ministop: {
+    label: 'ミニストップ',
+    color: '#1c3f94',
+    re: /ミニストップ|mini\s?stop/i,
+    icon: '<svg viewBox="0 0 32 32" aria-hidden="true"><rect x="1" y="1" width="30" height="30" rx="7" fill="#1c3f94" stroke="#fff" stroke-width="2"/><text x="16" y="21" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="16" font-weight="900" fill="#fff">M</text><rect x="7" y="23.5" width="18" height="3" rx="1.5" fill="#ffd200"/></svg>',
   },
 };
 
@@ -47,7 +54,7 @@ const NO_NAME_CAMPAIGN = '(名称未設定)';
 
 // ===== 保存データ =====
 const DEFAULTS = {
-  settings: { radius: 5, chains: ['lawson', 'seven'], dwell: 5, roundtrip: false, skipRecorded: true, campaign: '' },
+  settings: { radius: 5, chains: ['lawson', 'seven', 'ministop'], dwell: 5, roundtrip: false, skipRecorded: true, campaign: '' },
   start: null, // { lat, lng, label }
   stores: [], // 直近の検索結果
   searchedAt: null,
@@ -55,6 +62,7 @@ const DEFAULTS = {
   excluded: {}, // { storeId: true }
   records: {}, // { くじ名: { storeId: { status, note, at } } }
   route: null,
+  knownChains: Object.keys(CHAINS),
 };
 
 const db = load();
@@ -64,7 +72,13 @@ function load() {
   try {
     const raw = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
     // 半径は保存値を使わず、毎回初期値から始める
-    return { ...base, ...raw, settings: { ...base.settings, ...raw.settings, radius: base.settings.radius } };
+    const settings = { ...base.settings, ...raw.settings, radius: base.settings.radius };
+    // 後から追加したチェーンのうち初期値でオンのものは、保存済みの選択にも加える
+    const known = raw.knownChains ?? ['lawson', 'seven', 'family'];
+    for (const k of base.settings.chains) {
+      if (!known.includes(k) && !settings.chains.includes(k)) settings.chains.push(k);
+    }
+    return { ...base, ...raw, settings, knownChains: Object.keys(CHAINS) };
   } catch {
     return base;
   }

@@ -7,7 +7,7 @@
   <meta name="theme-color" content="#0068b7">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
   <!-- ?v= は更新時にブラウザの古いキャッシュを使わせないためのもの。CSS/JS を変えたら上げる -->
-  <link rel="stylesheet" href="style.css?v=4">
+  <link rel="stylesheet" href="style.css?v=5">
 </head>
 <body>
   <header class="topbar">
@@ -37,6 +37,7 @@
         <label><input type="checkbox" name="chain" value="lawson"> <span class="chain-icon" data-chain="lawson"></span>ローソン</label>
         <label><input type="checkbox" name="chain" value="seven"> <span class="chain-icon" data-chain="seven"></span>セブン-イレブン</label>
         <label><input type="checkbox" name="chain" value="family"> <span class="chain-icon" data-chain="family"></span>ファミリーマート</label>
+        <label><input type="checkbox" name="chain" value="ministop"> <span class="chain-icon" data-chain="ministop"></span>ミニストップ</label>
       </div>
 
       <button id="btn-search" class="btn primary block" type="button">🔍 店舗を検索</button>
@@ -84,6 +85,6 @@
   <div id="toast" class="toast" hidden></div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-  <script src="app.js?v=4"></script>
+  <script src="app.js?v=5"></script>
 </body>
 </html>
