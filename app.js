@@ -1060,9 +1060,20 @@ function routeTimes(r) {
 let navOpenStore = null;
 let navOpenShown = null;
 
+// 「計画を作る」は、計画を作ったあと、条件（出発地・半径・店の選び方・設定）が変わるまで押せないようにする
+function renderPlanButton() {
+  const r = db.route;
+  const fresh = !!r && !r.stale;
+  const btn = $('#btn-plan');
+  btn.textContent = !r ? '🗓 計画を作る' : r.stale ? '🗓 計画を作り直す' : '🗓 計画は最新です';
+  btn.disabled = searching || fresh;
+  btn.title = fresh ? '出発地・半径・回る店・設定のどれかを変えると、もう一度作れます' : '';
+}
+
 function renderRoute() {
   layers.route.clearLayers();
   const r = db.route;
+  renderPlanButton();
   $('#nav-empty').hidden = !!r;
   $('#nav-body').hidden = !r;
   // 計画タブの回る店の一覧と「次へ：巡回へ →」は、計画を作ってから出す
@@ -1404,6 +1415,7 @@ $('#busy-cancel').addEventListener('click', () => searchAbort?.abort());
 // 設定タブ
 $('#campaign').addEventListener('change', (e) => {
   db.settings.campaign = e.target.value;
+  markRouteStale(); // 使う取扱店リストと記録が変わるため
   save();
   renderAll();
 });
@@ -1520,7 +1532,10 @@ $('#store-hint').addEventListener('click', (e) => {
 });
 
 // 計画タブ
-$('#btn-plan').addEventListener('click', (e) => withBusy(e.currentTarget, '計画中…', () => computePlan(false)));
+$('#btn-plan').addEventListener('click', async (e) => {
+  await withBusy(e.currentTarget, '計画中…', () => computePlan(false));
+  renderPlanButton(); // withBusy がボタンの文字と押せるかを戻したあとに、付け直す
+});
 
 $('#store-list').addEventListener('change', (e) => {
   const id = e.target.closest('[data-id]')?.dataset.id;
