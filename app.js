@@ -5,7 +5,7 @@
 
 // ===== 設定 =====
 const STORAGE_KEY = 'konbini-route:v1';
-const APP_URL = 'https://tyra0119.github.io/lawson/';
+const APP_URL = 'https://tyra0119.github.io/pj_conveniencestore/'; // 公開先（GitHub Pages）
 
 // icon はチェーンの配色をもとにした簡易アイコン（公式ロゴではない）
 const CHAINS = {
