@@ -35,7 +35,7 @@ API キー不要・完全無料で動きます（ビルド不要の静的サイ�
 |---|---|
 | 地図表示 | Leaflet ＋ OpenStreetMap タイル |
 | 住所検索 | 国土地理院 住所検索 API（失敗時 Nominatim） |
-| 店舗データ | OpenStreetMap（Overpass API） |
+| 店舗データ | OpenStreetMap（Overpass API）。返りが遅いときは複数のサーバーへ同時に問い合わせ、最初に返ったものを使う |
 | 道路距離・所要時間 | OSRM 公開デモサーバー（失敗時は直線距離×1.35で概算） |
 | 巡回順の計算 | 15店舗以下：Held-Karp 法で**厳密な最短**／それ以上：最近傍法＋2-opt |
 | ナビ | Google マップ URL（経由地は1リンク9か所ごとに分割） |

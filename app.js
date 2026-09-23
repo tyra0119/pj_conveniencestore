@@ -50,13 +50,17 @@ const STATUSES = {
   skip: { label: 'スキップ', icon: '⏭', tone: 'skip' },
 };
 
-// 公開 Overpass サーバーは混雑すると 504 やタイムアウトになるため、応答の速い順に試す。
-// maps.mail.ru は応答しないまま待たされることがある（ConveniRadar で 15 秒切れが続いた）ので短めに切り上げる
+// 公開 Overpass サーバーは当たり外れが大きい（同じサーバーでも 2 秒で返ることも、まったく返らないこともある）。
+// 1 つずつ順に試すと、落ちているサーバーの分だけ待たされる（2026-09-23 に 3 つ全部で 55 秒待ち）ので、
+// 返りが遅いときは delay ミリ秒後に次のサーバーへも同じ問い合わせを出し、最初に返ったものを使う
 const OVERPASS_ENDPOINTS = [
-  { url: 'https://maps.mail.ru/osm/tools/overpass/api/interpreter', timeout: 10000 },
-  { url: 'https://overpass-api.de/api/interpreter', timeout: 15000 },
-  { url: 'https://overpass.kumi.systems/api/interpreter', timeout: 30000 },
+  { url: 'https://overpass-api.de/api/interpreter', delay: 0 },
+  { url: 'https://overpass.openstreetmap.fr/api/interpreter', delay: 2000 },
+  { url: 'https://maps.mail.ru/osm/tools/overpass/api/interpreter', delay: 4000 },
+  { url: 'https://overpass.kumi.systems/api/interpreter', delay: 6000 },
+  { url: 'https://overpass.private.coffee/api/interpreter', delay: 8000 },
 ];
+const OVERPASS_DEADLINE = 20000; // どのサーバーからも返らないとき、ここで失敗にする
 const OSRM_BASE = 'https://router.project-osrm.org';
 const EXACT_LIMIT = 15; // この店舗数以下なら全組み合わせから厳密な最短を求める
 const GMAPS_MAX_WAYPOINTS = 9; // Googleマップ URL に渡せる経由地の上限
@@ -271,27 +275,58 @@ async function geocode(q) {
 }
 
 // signal: 利用者が「中断」を押したら止める。次のサーバーも試さずに CancelError にする
-async function fetchStores(center, radiusKm, signal) {
-  const query = `[out:json][timeout:25];nwr["shop"="convenience"](around:${Math.round(radiusKm * 1000)},${center.lat.toFixed(6)},${center.lng.toFixed(6)});out center tags;`;
-  const scale = radiusKm > 10 ? 2 : 1; // 広い範囲は時間がかかるので待ち時間を伸ばす
+// 中断・成功で止められる待ち時間
+const wait = (ms, signal) => new Promise((resolve, reject) => {
+  const timer = setTimeout(resolve, ms);
+  signal?.addEventListener('abort', () => {
+    clearTimeout(timer);
+    reject(new DOMException('aborted', 'AbortError'));
+  }, { once: true });
+});
+
+// 同じ問い合わせを時間差で複数のサーバーへ出し、最初に返ったものを使う
+async function raceOverpass(query, signal, scale) {
+  const ctrl = new AbortController(); // 1 つ成功したら、残りの問い合わせは止める
+  const stop = () => ctrl.abort();
+  signal?.addEventListener('abort', stop, { once: true });
   const errors = [];
-  const cancelled = () => new CancelError('店舗の検索を中断しました');
-  for (const { url, timeout } of OVERPASS_ENDPOINTS) {
-    if (signal?.aborted) throw cancelled();
+  const attempt = async ({ url, delay }) => {
     const host = new URL(url).hostname;
     try {
-      const json = await fetchJson(url, { method: 'POST', body: new URLSearchParams({ data: query }), signal }, timeout * scale);
+      if (delay) await wait(delay * scale, ctrl.signal);
+      const json = await fetchJson(url, { method: 'POST', body: new URLSearchParams({ data: query }), signal: ctrl.signal }, (OVERPASS_DEADLINE - delay) * scale);
       // 混雑時は HTTP 200 のまま remark にエラーが入り、結果が空や途中までになることがある
       if (/runtime error|timed out|rate_limited|out of memory/i.test(json.remark ?? '')) throw new Error(json.remark);
-      return dedupe(json.elements.map(toStore).filter(Boolean));
+      return json;
     } catch (e) {
-      if (signal?.aborted) throw cancelled();
-      console.warn(host, e);
+      if (!ctrl.signal.aborted) console.warn(host, e);
       errors.push(`${host}: ${e.name === 'AbortError' ? 'タイムアウト' : e.name === 'TypeError' ? '接続できません' : e.message}`);
+      throw e;
     }
+  };
+
+  try {
+    return await Promise.any(OVERPASS_ENDPOINTS.map(attempt));
+  } catch {
+    if (signal?.aborted) throw new CancelError('店舗の検索を中断しました');
+    const keep = db.stores.length ? '前回の検索結果はそのまま使えます。' : '';
+    throw new Error(`店舗データのサーバーが混雑しています。少し待ってから再検索してください。${keep}（${errors.join(' / ')}）`);
+  } finally {
+    stop();
+    signal?.removeEventListener('abort', stop);
   }
-  const keep = db.stores.length ? '前回の検索結果はそのまま使えます。' : '';
-  throw new Error(`店舗データのサーバーが混雑しています。少し待ってから再検索してください。${keep}（${errors.join(' / ')}）`);
+}
+
+// signal: 利用者が「中断」を押したら止める。
+// 中心からの距離（around）より四角い範囲（bbox）の方がサーバーの負担が軽いので、範囲で取ってから半径の中だけに絞る
+async function fetchStores(center, radiusKm, signal) {
+  const dLat = radiusKm / 111.32;
+  const dLng = radiusKm / (111.32 * Math.max(0.1, Math.cos((center.lat * Math.PI) / 180)));
+  const box = [center.lat - dLat, center.lng - dLng, center.lat + dLat, center.lng + dLng].map((v) => v.toFixed(6)).join(',');
+  const query = `[out:json][timeout:25];nwr["shop"="convenience"](${box});out center tags;`;
+  const scale = radiusKm > 10 ? 2 : 1; // 広い範囲は時間がかかるので待ち時間を伸ばす
+  const json = await raceOverpass(query, signal, scale);
+  return dedupe(json.elements.map(toStore).filter((s) => s && haversine(center, s) <= radiusKm * 1000));
 }
 
 function toStore(el) {
@@ -635,7 +670,9 @@ function blockedWhileSearching() {
 function searchCovers() {
   if (activeKujiList()) return true; // 取扱店リストで回るときは、店舗検索は使わない
   const s = db.searched;
-  return !!(s && db.start && haversine(s, db.start) < 1 && s.radius >= db.settings.radius);
+  if (!s || !db.start) return false;
+  // 前に探した範囲の中に今の範囲が収まっていれば、探し直さなくてよい（出発地を少し動かしただけのときなど）
+  return haversine(s, db.start) + db.settings.radius * 1000 <= s.radius * 1000 + 1;
 }
 
 // 回る候補の店。取扱店リストで回るときはリストの店、そうでなければ OpenStreetMap で検索した店
