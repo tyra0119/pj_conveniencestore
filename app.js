@@ -827,7 +827,7 @@ function setNote(id, note) {
 }
 
 // ===== 地図 =====
-const map = L.map('map', { keyboard: false }).setView([36.2, 138.25], 5);
+const map = L.map('map', { keyboard: false, zoomControl: false }).setView([36.2, 138.25], 5);
 L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
   maxZoom: 19,
   attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors',
@@ -839,6 +839,58 @@ const layers = {
   stores: L.layerGroup().addTo(map),
 };
 const markers = new Map();
+
+// ===== 地図のボタン =====
+// 置き場所と並びは Google マップに合わせる（右下に縦：方角・現在地・拡大・縮小。拡大と縮小は 1 つのまとまり）。
+// 全プロジェクト共通の決まり（~/.claude/CLAUDE.md）。出典の表示は左下に寄せて、ボタンと重ならないようにする
+map.attributionControl.setPosition('bottomleft');
+
+const COMPASS_SVG = '<svg viewBox="-30 -30 60 60" aria-hidden="true"><path class="c-n" d="M0 -22 L7 0 L-7 0 Z"/><path class="c-s" d="M0 22 L7 0 L-7 0 Z"/><text class="c-t" x="0" y="-11" text-anchor="middle" dominant-baseline="central" font-size="9">N</text></svg>';
+const LOCATE_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.6" fill="#0068b7"/><circle cx="12" cy="12" r="7.5" fill="none" stroke="#0068b7" stroke-width="2"/><path d="M12 1.5v3.5M12 19v3.5M1.5 12h3.5M19 12h3.5" stroke="#0068b7" stroke-width="2" stroke-linecap="round"/></svg>';
+
+let meMarker = null;
+async function showMyLocation(btn) {
+  btn.disabled = true;
+  try {
+    const pos = await getPosition();
+    if (meMarker) meMarker.remove();
+    meMarker = L.circleMarker([pos.lat, pos.lng], { radius: 7, color: '#fff', weight: 2, fillColor: '#1a73e8', fillOpacity: 1 })
+      .bindTooltip('現在地')
+      .addTo(map);
+    map.setView([pos.lat, pos.lng], Math.max(map.getZoom(), 15));
+  } catch (e) {
+    // 屋内など現在地が取れないところでは、出発地（計画中ならその出発地）を画面の中ほどに
+    const fallback = db.start ?? db.route?.start;
+    if (!fallback) notice(e.message, { title: '現在地を取得できませんでした' });
+    else {
+      map.setView([fallback.lat, fallback.lng], Math.max(map.getZoom(), 13));
+      toast('現在地を取得できないので、出発地を表示します', 5000);
+    }
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+const MapButtons = L.Control.extend({
+  options: { position: 'bottomright' },
+  onAdd() {
+    const box = L.DomUtil.create('div', 'map-buttons');
+    box.innerHTML = `
+      <button class="map-btn compass" type="button" title="北が上です（この地図は回転しません）" aria-label="方角：北が上">${COMPASS_SVG}</button>
+      <button class="map-btn locate" type="button" title="現在地を表示" aria-label="現在地を表示">${LOCATE_SVG}</button>
+      <div class="map-zoom">
+        <button class="map-btn zoom-in" type="button" title="拡大" aria-label="拡大">＋</button>
+        <button class="map-btn zoom-out" type="button" title="縮小" aria-label="縮小">−</button>
+      </div>`;
+    L.DomEvent.disableClickPropagation(box);
+    L.DomEvent.disableScrollPropagation(box);
+    box.querySelector('.locate').addEventListener('click', (e) => showMyLocation(e.currentTarget));
+    box.querySelector('.zoom-in').addEventListener('click', () => map.zoomIn());
+    box.querySelector('.zoom-out').addEventListener('click', () => map.zoomOut());
+    return box;
+  },
+});
+map.addControl(new MapButtons());
 
 const pinIcon = (color, text) => L.divIcon({
   className: 'pin-wrap',

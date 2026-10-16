@@ -385,6 +385,36 @@ input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--primary)
 .report-actions .btn { flex: 1; }
 .report-preview { max-height: 240px; margin: 6px 0 0; padding: 8px; overflow: auto; font: 12px/1.5 inherit; white-space: pre-wrap; background: #fff; border: 1px solid var(--line); border-radius: 8px; }
 
+/* ===== 地図のボタン（右下に縦：方角・現在地・拡大・縮小） ===== */
+.map-buttons { display: flex; flex-direction: column; align-items: center; gap: 10px; margin: 0 10px 10px 0; }
+.map-btn {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  font: inherit;
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text);
+  cursor: pointer;
+  background: #fff;
+  border: none;
+  border-radius: 50%;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, .3);
+}
+.map-btn:hover { background: #f1f3f5; }
+.map-btn:disabled { cursor: progress; opacity: .6; }
+.map-btn svg { width: 26px; height: 26px; }
+.map-btn.compass { cursor: default; }
+.map-btn.compass .c-n { fill: #d23a3a; }
+.map-btn.compass .c-s { fill: #868e96; }
+.map-btn.compass .c-t { fill: #fff; font-weight: 700; }
+/* 拡大・縮小は 1 つのまとまりにする */
+.map-zoom { overflow: hidden; border-radius: 22px; box-shadow: 0 1px 4px rgba(0, 0, 0, .3); }
+.map-zoom .map-btn { border-radius: 0; box-shadow: none; }
+.map-zoom .map-btn + .map-btn { border-top: 1px solid var(--line); }
+
 /* ===== 地図ピン ===== */
 .pin-wrap { background: none; border: none; }
 .pin {
